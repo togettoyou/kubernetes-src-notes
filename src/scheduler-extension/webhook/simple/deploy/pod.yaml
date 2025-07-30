@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-scheduler
+  labels:
+    app: test-scheduler
+spec:
+  schedulerName: simple-scheduler
+  containers:
+    - name: test-scheduler
+      image: nginx
+      imagePullPolicy: IfNotPresent

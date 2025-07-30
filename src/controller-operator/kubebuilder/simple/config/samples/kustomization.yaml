@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- simple_v1_mypod.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples

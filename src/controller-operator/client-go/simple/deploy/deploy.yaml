@@ -1,0 +1,49 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: simple-controller-client-go
+rules:
+  - apiGroups: [ "" ]
+    resources:
+      - pods
+    verbs: [ "get", "list", "watch" ]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: simple-controller-client-go
+  namespace: controller-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: simple-controller-client-go
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: simple-controller-client-go
+subjects:
+  - kind: ServiceAccount
+    name: simple-controller-client-go
+    namespace: controller-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-controller-client-go-deployment
+  namespace: controller-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-controller-client-go
+  template:
+    metadata:
+      labels:
+        app: simple-controller-client-go
+    spec:
+      containers:
+        - name: simple-controller-client-go
+          image: togettoyou/simple-controller-client-go:latest
+          imagePullPolicy: IfNotPresent
+      serviceAccountName: simple-controller-client-go

@@ -1,0 +1,112 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: simple-webhook-server-issuer
+  namespace: webhook-system
+spec:
+  selfSigned: { }
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: simple-webhook-server-cert
+  namespace: webhook-system
+spec:
+  dnsNames:
+    - simple-webhook-server.webhook-system.svc
+  issuerRef:
+    kind: Issuer
+    name: simple-webhook-server-issuer
+  secretName: simple-webhook-server-cert
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-webhook-server-deployment
+  namespace: webhook-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-webhook-server
+  template:
+    metadata:
+      labels:
+        app: simple-webhook-server
+    spec:
+      containers:
+        - name: simple-webhook-server
+          image: togettoyou/simple-webhook-server:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --tls-crt-file=/etc/webhook/certs/tls.crt
+            - --tls-key-file=/etc/webhook/certs/tls.key
+            - --port=443
+          volumeMounts:
+            - name: cert
+              mountPath: "/etc/webhook/certs"
+              readOnly: true
+      volumes:
+        - name: cert
+          secret:
+            secretName: simple-webhook-server-cert
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-webhook-server
+  namespace: webhook-system
+spec:
+  ports:
+    - port: 443
+      targetPort: 443
+  selector:
+    app: simple-webhook-server
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: simple-mutating-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: webhook-system/simple-webhook-server-cert
+webhooks:
+  - name: simple-webhook-server.mutating.webhook-system.io
+    clientConfig:
+      service:
+        name: simple-webhook-server
+        namespace: webhook-system
+        path: "/mutating"
+    rules:
+      - operations: [ "CREATE" ]
+        apiGroups: [ "" ]
+        apiVersions: [ "v1" ]
+        resources: [ "pods" ]
+    admissionReviewVersions: [ "v1", "v1beta1" ]
+    sideEffects: None
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: simple-webhook
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: simple-validating-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: webhook-system/simple-webhook-server-cert
+webhooks:
+  - name: simple-webhook-server.validating.webhook-system.io
+    clientConfig:
+      service:
+        name: simple-webhook-server
+        namespace: webhook-system
+        path: "/validating"
+    rules:
+      - operations: [ "CREATE" ]
+        apiGroups: [ "" ]
+        apiVersions: [ "v1" ]
+        resources: [ "pods" ]
+    admissionReviewVersions: [ "v1", "v1beta1" ]
+    sideEffects: None
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: simple-webhook

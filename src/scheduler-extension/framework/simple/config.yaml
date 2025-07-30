@@ -1,0 +1,26 @@
+apiVersion: kubescheduler.config.k8s.io/v1
+kind: KubeSchedulerConfiguration
+leaderElection:
+  leaderElect: false
+clientConnection:
+  kubeconfig: /root/.kube/config
+profiles:
+  - schedulerName: simple-scheduler
+    plugins:
+      preFilter:
+        enabled:
+          - name: SimplePlugin
+      filter:
+        enabled:
+          - name: SimplePlugin
+      preBind:
+        enabled:
+          - name: SimplePlugin
+      bind:
+        enabled:
+          - name: SimplePlugin
+        disabled:
+          - name: "*"
+      postBind:
+        enabled:
+          - name: SimplePlugin

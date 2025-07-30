@@ -1,0 +1,37 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: simple-controller
+rules:
+  - apiGroups: [ "" ]
+    resources:
+      - pods
+    verbs: [ "get", "list", "watch" ]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: simple-controller
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: simple-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: simple-controller
+subjects:
+  - kind: ServiceAccount
+    name: simple-controller
+    namespace: default
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    kubernetes.io/service-account.name: simple-controller
+  name: simple-controller
+  namespace: default
+type: kubernetes.io/service-account-token

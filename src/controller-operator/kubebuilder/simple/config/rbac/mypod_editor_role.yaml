@@ -1,0 +1,31 @@
+# permissions for end users to edit mypods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: mypod-editor-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: simple
+    app.kubernetes.io/part-of: simple
+    app.kubernetes.io/managed-by: kustomize
+  name: mypod-editor-role
+rules:
+- apiGroups:
+  - simple.controller.io
+  resources:
+  - mypods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - simple.controller.io
+  resources:
+  - mypods/status
+  verbs:
+  - get

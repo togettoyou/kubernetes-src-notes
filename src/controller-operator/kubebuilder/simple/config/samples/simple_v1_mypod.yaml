@@ -1,0 +1,12 @@
+apiVersion: simple.controller.io/v1
+kind: MyPod
+metadata:
+  labels:
+    app.kubernetes.io/name: mypod
+    app.kubernetes.io/instance: mypod-sample
+    app.kubernetes.io/part-of: simple
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: simple
+  name: mypod-sample
+spec:
+  # TODO(user): Add fields here
