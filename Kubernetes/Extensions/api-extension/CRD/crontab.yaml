@@ -1,8 +1,0 @@
-apiVersion: simple.extension.io/v1
-kind: CronTab
-metadata:
-  name: test-cron
-spec:
-  cronSpec: "* * * * */5"
-  image: "hello-world"
-  replicas: 1
