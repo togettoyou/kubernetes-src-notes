@@ -1,0 +1,77 @@
+title: Kubernetes 源码阅读
+baseURL: https://togettoyou.github.io/kubernetes-src-notes/
+languageCode: zh-CN
+defaultContentLanguage: zh-cn
+enableEmoji: true
+hasCJKLanguage: true
+enableRobotsTXT: true
+outputs:
+  home: [ HTML ]
+  page: [ HTML ]
+  section: [ HTML, RSS ]
+module:
+  imports:
+    - path: github.com/imfing/hextra
+markup:
+  highlight:
+    noClasses: false
+  goldmark:
+    renderer:
+      unsafe: true
+    extensions:
+      passthrough:
+        delimiters:
+          block: [ [ '\[', '\]' ], [ '$$', '$$' ] ]
+          inline: [ [ '\(', '\)' ] ]
+        enable: true
+menu:
+  main:
+    - identifier: home
+      name: 首页
+      pageRef: /
+      weight: 1
+    - identifier: about
+      name: 关于我
+      pageRef: /about
+      weight: 2
+    - name: Search
+      weight: 3
+      params:
+        type: search
+    - name: GitHub
+      weight: 4
+      url: "https://github.com/togettoyou/kubernetes-src-notes"
+      params:
+        icon: github
+params:
+  description: Kubernetes 源码阅读|更多内容请关注微信公众号：gopher云原生
+  theme:
+    default: system
+    displayToggle: true
+  navbar:
+    displayTitle: true
+    displayLogo: true
+    logo:
+      path: https://kubernetes.io/images/kubernetes.png
+      dark: https://kubernetes.io/images/kubernetes.png
+    width: wide
+  page:
+    width: normal
+  footer:
+    enable: false
+  displayUpdatedDate: true
+  dateFormat: "2006-01-02"
+  toc:
+    displayTags: true
+  highlight:
+    copy:
+      enable: true
+      display: hover
+  search:
+    enable: true
+    type: flexsearch
+    flexsearch:
+      index: content
+      tokenize: forward
+  comments:
+    enable: false
