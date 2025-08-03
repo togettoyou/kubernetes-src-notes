@@ -2,7 +2,7 @@
 title: kubectl 插件
 ---
 
-参考：https://kubernetes.io/zh-cn/docs/tasks/extend-kubectl/kubectl-plugins/
+参考：[kubectl-plugins](https://kubernetes.io/zh-cn/docs/tasks/extend-kubectl/kubectl-plugins/)
 
 ## 代码示例
 

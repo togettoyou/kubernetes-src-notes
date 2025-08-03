@@ -2,7 +2,7 @@
 title: CNI 容器网络接口
 ---
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/
+参考：[network-plugins](https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/)
 
 ## 微信公众号
 

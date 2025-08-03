@@ -2,11 +2,11 @@
 title: 调度扩展
 ---
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/#scheduling-extensions
+参考：[scheduling-extensions](https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/#scheduling-extensions)
 
 ## scheduler extender 调度扩展 （Webhook）
 
-参考：https://github.com/kubernetes/design-proposals-archive/blob/main/scheduling/scheduler_extender.md
+参考：[scheduler_extender](https://github.com/kubernetes/design-proposals-archive/blob/main/scheduling/scheduler_extender.md)
 
 调度扩展实际是一种 Webhook ，kube-scheduler 通过 http 调用
 
@@ -16,13 +16,13 @@ title: 调度扩展
 
 ## scheduler framework 调度框架
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/scheduling-eviction/scheduling-framework/
+参考：[scheduling-framework](https://kubernetes.io/zh-cn/docs/concepts/scheduling-eviction/scheduling-framework/)
 
 代码示例：[scheduler-extension/framework/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/scheduler-extension/framework/simple)
 
 ## WebAssembly (wasm) 自定义插件
 
-参考：https://github.com/kubernetes-sigs/kube-scheduler-wasm-extension/blob/main/docs/tutorial.md
+参考：[kube-scheduler-wasm-extension](https://github.com/kubernetes-sigs/kube-scheduler-wasm-extension/blob/main/docs/tutorial.md)
 
 代码示例：[scheduler-extension/wasm-extension/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/scheduler-extension/wasm-extension/simple)
 

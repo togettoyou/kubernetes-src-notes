@@ -2,7 +2,7 @@
 title: CRI 容器运行时接口
 ---
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/architecture/cri/
+参考：[architecture/cri](https://kubernetes.io/zh-cn/docs/concepts/architecture/cri/)
 
 ## 微信公众号
 

@@ -2,7 +2,7 @@
 title: 准入 Webhook
 ---
 
-参考：https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/extensible-admission-controllers/
+参考：[extensible-admission-controllers](https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/extensible-admission-controllers/)
 
 > Kubernetes API Server 必须通过 HTTPS 访问 Webhook Server
 

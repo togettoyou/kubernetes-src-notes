@@ -2,7 +2,7 @@
 title: CSI 容器存储接口
 ---
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/storage/volumes/#csi
+参考：[storage/volumes/#csi](https://kubernetes.io/zh-cn/docs/concepts/storage/volumes/#csi)
 
 ## 微信公众号
 

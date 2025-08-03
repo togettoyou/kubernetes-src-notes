@@ -2,7 +2,7 @@
 title: kubelet 设备插件
 ---
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/
+参考：[device-plugins](https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/)
 
 ## 微信公众号
 

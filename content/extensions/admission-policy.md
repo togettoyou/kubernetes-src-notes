@@ -4,7 +4,7 @@ title: 准入策略 CEL
 
 ## 变更性准入策略（MutatingAdmissionPolicy）
 
-参考：https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/mutating-admission-policy/
+参考：[mutating-admission-policy](https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/mutating-admission-policy/)
 
 ```yaml
 apiVersion: admissionregistration.k8s.io/v1alpha1
@@ -46,7 +46,7 @@ spec:
 
 ## 验证准入策略（ValidatingAdmissionPolicy）
 
-参考：https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/validating-admission-policy/
+参考：[validating-admission-policy](https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/validating-admission-policy/)
 
 ```yaml
 apiVersion: admissionregistration.k8s.io/v1

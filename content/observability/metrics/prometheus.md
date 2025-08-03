@@ -45,7 +45,7 @@ prometheus-pushgateway:
   enabled: false
 ```
 
-配置参考：https://github.com/prometheus-community/helm-charts/tree/prometheus-25.24.1/charts/prometheus
+配置参考：[https://github.com/prometheus-community/helm-charts/tree/prometheus-25.24.1/charts/prometheus](https://github.com/prometheus-community/helm-charts/tree/prometheus-25.24.1/charts/prometheus)
 
 ## 附录
 

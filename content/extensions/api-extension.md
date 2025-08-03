@@ -2,7 +2,7 @@
 title: 扩展 Kubernetes API
 ---
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/api-extension/
+参考：[extend-kubernetes/api-extension](https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/api-extension/)
 
 扩展 Kubernetes API 实际就是创建定制资源（Custom Resources，CR）
 
@@ -20,7 +20,7 @@ title: 扩展 Kubernetes API
 
 ## 方案一：定制资源定义（CustomResourceDefinitions，CRD）+ 定制控制器（Custom Controller）= Operator 模式
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/api-extension/custom-resources/
+参考：[api-extension/custom-resources](https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 利用 kube-apiserver 的最后一个服务 APIExtensionsServer ，kube-apiserver 对 CRD 声明的 CR 有通用的 CRUD Handle 逻辑
 ，和内置资源一样，会存储到 etcd 中
@@ -152,7 +152,7 @@ No resources found in default namespace.
 
 ## 方案二：API 聚合（API Aggregation，AA）
 
-参考：https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/api-extension/apiserver-aggregation/
+参考：[api-extension/apiserver-aggregation](https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/api-extension/apiserver-aggregation/)
 
 利用 kube-apiserver 的第一个服务 AggregatorServer ，kube-apiserver 发现收到自定义 APIService 的请求时，会转发到对应的自行编写和部署的扩展
 API 服务器（Extension API Server），相比方案一，有更强扩展性：

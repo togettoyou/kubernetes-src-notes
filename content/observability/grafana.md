@@ -44,7 +44,7 @@ grafana.ini:
     enabled: false
 ```
 
-配置参考：https://github.com/grafana/helm-charts/tree/grafana-8.3.6/charts/grafana
+配置参考：[https://github.com/grafana/helm-charts/tree/grafana-8.3.6/charts/grafana](https://github.com/grafana/helm-charts/tree/grafana-8.3.6/charts/grafana)
 
 ## 附录
 
