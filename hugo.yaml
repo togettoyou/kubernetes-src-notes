@@ -56,7 +56,7 @@ params:
       dark: https://kubernetes.io/images/kubernetes.png
     width: wide
   page:
-    width: normal
+    width: full
   footer:
     enable: false
   displayUpdatedDate: true
