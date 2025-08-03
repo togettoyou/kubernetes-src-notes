@@ -74,4 +74,10 @@ params:
       index: content
       tokenize: forward
   comments:
-    enable: false
+    enable: true
+    type: giscus
+    giscus:
+      repo: togettoyou/kubernetes-src-notes
+      repoId: R_kgDOLECc5Q
+      category: Announcements
+      categoryId: DIC_kwDOLECc5c4CtunB
