@@ -5,7 +5,7 @@ cascade:
   type: docs
 ---
 
-版本：Kubernetes [1.27.2](https://git.k8s.io/kubernetes/CHANGELOG/CHANGELOG-1.27.md#v1272)
+版本：Kubernetes [1.27.2](https://github.com/kubernetes/kubernetes/tree/v1.27.2)
 
 代码结构：
 
