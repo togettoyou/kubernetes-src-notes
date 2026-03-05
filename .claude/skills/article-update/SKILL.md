@@ -1,6 +1,7 @@
 ---
 name: article-update
 description: 文章更新助手。分析当前文件夹下所有章节的写作风格，参考指定位置的源码，继续编写用户指定的文章。当用户想继续写某篇文章、更新文章内容、或要求结合源码写作时触发。
+disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash, Edit, Write
 ---
 
