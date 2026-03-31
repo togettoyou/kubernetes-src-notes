@@ -44,7 +44,7 @@ menu:
       params:
         icon: github
 params:
-  description: Kubernetes 源码阅读|更多内容请关注微信公众号：gopher云原生
+  description: Kubernetes 源码阅读|更多内容请关注微信公众号：gopher的Infra修行
   theme:
     default: system
     displayToggle: true
