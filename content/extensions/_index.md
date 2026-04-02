@@ -19,8 +19,6 @@ Kubernetes 提供了两种定制方式，扩展并非第一选择：
 
 Kubernetes 的扩展点遍布请求处理链路和各个控制面组件，按层次大致可以分为以下几类。
 
-<details><summary>展开/收起</summary>
-
 ```plantuml
 @startuml
 !theme plain
@@ -62,20 +60,13 @@ apiLayer -[hidden]down-> nodeLayer
 @enduml
 ```
 
-</details>
-
-![](/extensions/diagram-01.svg)
-
 ### API 层扩展
 
 API 层扩展用于向 Kubernetes 引入自定义资源，或在请求到达处理逻辑前进行拦截和变更。
 
 **自定义资源（Custom Resources）**
 
-- **CRD + Controller（Operator 模式）**：最主流的扩展方式。通过 CustomResourceDefinition 声明新的资源类型，kube-apiserver 的 APIExtensionsServer 会自动提供 CRUD 接口，数据持久化到 etcd 中；再配合自定义控制器持续监听资源状态、驱动实际状态向期望状态收敛，即 Operator 模式。Controller 的开发工具从低到高分三个层次：
-  - **client-go**：直接使用 Informer 机制，是 kube-controller-manager 本身所采用的方式
-  - **controller-runtime**：更高层次的抽象框架，封装了 Manager、Reconciler 等概念，是目前社区的主流选择
-  - **Kubebuilder / Operator SDK**：基于 controller-runtime 的代码脚手架，快速生成项目骨架和 CRD 资源定义
+- **CRD + Controller（Operator 模式）**：最主流的扩展方式。通过 CustomResourceDefinition 声明新的资源类型，kube-apiserver 的 APIExtensionsServer 会自动提供 CRUD 接口，数据持久化到 etcd 中；再配合自定义控制器持续监听资源状态、驱动实际状态向期望状态收敛，即 Operator 模式。Controller 的开发工具从低到高分三个层次：直接使用 Informer 机制的 **client-go**（kube-controller-manager 本身所采用的方式）、封装了 Manager/Reconciler 等概念的 **controller-runtime**（目前社区的主流选择）、以及基于 controller-runtime 的代码脚手架 **Kubebuilder / Operator SDK**。
 - **API 聚合（API Aggregation，AA）**：当 CRD 无法满足需求时（如需要自定义存储、WebSocket 长连接子资源、或与外部系统深度集成），可以自行实现一个扩展 API 服务器（Extension API Server），通过 APIService 注册到 kube-apiserver 的聚合层（AggregatorServer），由 kube-apiserver 将匹配的请求转发过来。
 
 **准入控制（Admission Control）**
