@@ -19,6 +19,47 @@ Kubernetes 提供了两种定制方式，扩展并非第一选择：
 
 Kubernetes 的扩展点遍布请求处理链路和各个控制面组件，按层次大致可以分为以下几类。
 
+<details><summary>展开/收起</summary>
+
+```plantuml
+@startuml
+!theme plain
+skinparam defaultTextAlignment center
+skinparam rectangleBorderColor #888888
+skinparam rectangleBorderThickness 1.5
+skinparam rectangleFontStyle bold
+
+rectangle "工具层" as toolLayer #F3E5F5 {
+  rectangle "kubectl 插件" as kubectl #EDE7F6
+}
+
+rectangle "API 层" as apiLayer #E3F2FD {
+  rectangle "CRD + Controller\n(Operator 模式)" as crd #BBDEFB
+  rectangle "API Aggregation" as aa #BBDEFB
+  rectangle "准入 Webhook" as webhook #BBDEFB
+  rectangle "准入策略 CEL" as cel #BBDEFB
+}
+
+rectangle "调度层" as schedulerLayer #E8F5E9 {
+  rectangle "scheduler extender" as extender #C8E6C9
+  rectangle "scheduler framework" as framework #C8E6C9
+  rectangle "WASM 插件" as wasm #C8E6C9
+}
+
+rectangle "节点层" as nodeLayer #FFF3E0 {
+  rectangle "CRI" as cri #FFE0B2
+  rectangle "CNI" as cni #FFE0B2
+  rectangle "CSI" as csi #FFE0B2
+  rectangle "Device Plugin" as dp #FFE0B2
+  rectangle "DRA" as dra #FFE0B2
+}
+@enduml
+```
+
+</details>
+
+![](/extensions/diagram-01.svg)
+
 ### API 层扩展
 
 API 层扩展用于向 Kubernetes 引入自定义资源，或在请求到达处理逻辑前进行拦截和变更。
