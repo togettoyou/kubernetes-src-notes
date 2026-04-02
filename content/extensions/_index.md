@@ -52,6 +52,7 @@ kube-scheduler 提供了多种扩展方式，灵活性依次递增：
 - **CNI（Container Network Interface）**：容器网络接口，定义 Pod 网络的标准实现方式（Calico、Flannel、Cilium 等均基于此实现）
 - **CSI（Container Storage Interface）**：容器存储接口，允许第三方存储厂商以标准方式接入 Kubernetes 存储系统
 - **设备插件（Device Plugin）**：允许节点发布自定义硬件资源（如 GPU、NPU、FPGA），供 Pod 申请和使用
+- **动态资源分配（Dynamic Resource Allocation，DRA）**：v1.35 Stable，比设备插件更灵活的硬件资源分配机制，支持多个 Pod 共享同一设备、通过 CEL 表达式细粒度筛选设备属性，通过 ResourceClaim / DeviceClass 等 API 管理资源申领，使用体验类似 PersistentVolumeClaim
 
 ### 工具层扩展
 
@@ -63,29 +64,17 @@ kube-scheduler 提供了多种扩展方式，灵活性依次递增：
 |------|---------|
 | 引入自定义资源、自动化管理应用 | CRD + Controller（Operator 模式） |
 | 需要自定义存储、长连接或与外部系统深度集成 | API Aggregation |
-| 拦截/校验 Kubernetes 请求，逻辑简单 | 准入策略 CEL（ValidatingAdmissionPolicy） |
+| 拦截/校验 Kubernetes 请求，逻辑简单 | ValidatingAdmissionPolicy（CEL） |
 | 拦截/校验 Kubernetes 请求，逻辑复杂 | ValidatingAdmissionWebhook |
 | 自动注入 sidecar、修改资源字段 | MutatingAdmissionWebhook 或 MutatingAdmissionPolicy |
 | 干预 Pod 调度逻辑 | scheduler framework（复杂）/ scheduler extender（简单） |
-| 对接特殊硬件资源（GPU 等） | 设备插件 |
-| 自定义网络方案 | CNI 插件 |
-| 对接第三方存储 | CSI 插件 |
-| 自定义容器运行时 | CRI 插件 |
+| 对接特殊硬件资源，简单数量申请 | Device Plugin |
+| 对接特殊硬件资源，需共享设备或细粒度筛选 | DRA（Dynamic Resource Allocation） |
+| 自定义网络方案 | CNI |
+| 对接第三方存储 | CSI |
+| 自定义容器运行时 | CRI |
 
-一个常见的误区是遇到需求就直接上 Webhook。实际上，CEL 准入策略已经能覆盖绝大多数只读校验场景，且维护成本更低；对于引入自定义逻辑，CRD + Controller 才是最主流、也是社区最推荐的方式。
-
-## 本系列文章
-
-- [扩展 Kubernetes API](/kubernetes-src-notes/extensions/api-extension)：CRD 和 API Aggregation 的原理与实现
-- [控制器和 Operator 模式](/kubernetes-src-notes/extensions/controller-operator)：client-go、controller-runtime、Kubebuilder 三个层次的对比与实践
-- [准入 Webhook](/kubernetes-src-notes/extensions/admission-webhook)：证书配置、MutatingWebhook 和 ValidatingWebhook 的实现
-- [准入策略 CEL](/kubernetes-src-notes/extensions/admission-policy)：ValidatingAdmissionPolicy 与 MutatingAdmissionPolicy
-- [调度扩展](/kubernetes-src-notes/extensions/scheduler-extension)：scheduler extender、scheduler framework 与 WASM 插件
-- [CRI 容器运行时接口](/kubernetes-src-notes/extensions/cri)：kubelet 与容器运行时的标准协议
-- [CNI 容器网络接口](/kubernetes-src-notes/extensions/cni)：Pod 网络的标准实现接口
-- [CSI 容器存储接口](/kubernetes-src-notes/extensions/csi)：第三方存储接入的标准方式
-- [kubelet 设备插件](/kubernetes-src-notes/extensions/kubelet-device-plugin)：自定义硬件资源的发现与分配
-- [kubectl 插件](/kubernetes-src-notes/extensions/kubectl-plugin)：扩展 kubectl 命令行工具
+这些扩展机制并不互斥，实际项目中往往是多种组合使用。以 GPU 虚拟化项目 HAMi 为例，它同时用到了 MutatingAdmissionWebhook（修改 Pod 资源请求）、scheduler extender（自定义 GPU 调度策略）和 Device Plugin（向节点注册虚拟 GPU 资源），三者各司其职。
 
 ## 微信公众号
 
