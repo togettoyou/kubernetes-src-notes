@@ -29,30 +29,36 @@ skinparam rectangleBorderColor #888888
 skinparam rectangleBorderThickness 1.5
 skinparam rectangleFontStyle bold
 
-rectangle "工具层" as toolLayer #F3E5F5 {
-  rectangle "kubectl 插件" as kubectl #EDE7F6
+together {
+  rectangle "API 层" as apiLayer #E3F2FD {
+    rectangle "CRD + Controller\n(Operator 模式)" as crd #BBDEFB
+    rectangle "API Aggregation" as aa #BBDEFB
+    rectangle "准入 Webhook" as webhook #BBDEFB
+    rectangle "准入策略 CEL" as cel #BBDEFB
+  }
+
+  rectangle "调度层" as schedulerLayer #E8F5E9 {
+    rectangle "scheduler extender" as extender #C8E6C9
+    rectangle "scheduler framework" as framework #C8E6C9
+    rectangle "WASM 插件" as wasm #C8E6C9
+  }
 }
 
-rectangle "API 层" as apiLayer #E3F2FD {
-  rectangle "CRD + Controller\n(Operator 模式)" as crd #BBDEFB
-  rectangle "API Aggregation" as aa #BBDEFB
-  rectangle "准入 Webhook" as webhook #BBDEFB
-  rectangle "准入策略 CEL" as cel #BBDEFB
+together {
+  rectangle "节点层" as nodeLayer #FFF3E0 {
+    rectangle "CRI" as cri #FFE0B2
+    rectangle "CNI" as cni #FFE0B2
+    rectangle "CSI" as csi #FFE0B2
+    rectangle "Device Plugin" as dp #FFE0B2
+    rectangle "DRA" as dra #FFE0B2
+  }
+
+  rectangle "工具层" as toolLayer #F3E5F5 {
+    rectangle "kubectl 插件" as kubectl #EDE7F6
+  }
 }
 
-rectangle "调度层" as schedulerLayer #E8F5E9 {
-  rectangle "scheduler extender" as extender #C8E6C9
-  rectangle "scheduler framework" as framework #C8E6C9
-  rectangle "WASM 插件" as wasm #C8E6C9
-}
-
-rectangle "节点层" as nodeLayer #FFF3E0 {
-  rectangle "CRI" as cri #FFE0B2
-  rectangle "CNI" as cni #FFE0B2
-  rectangle "CSI" as csi #FFE0B2
-  rectangle "Device Plugin" as dp #FFE0B2
-  rectangle "DRA" as dra #FFE0B2
-}
+apiLayer -[hidden]down-> nodeLayer
 @enduml
 ```
 
