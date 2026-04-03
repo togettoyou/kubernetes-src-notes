@@ -545,3 +545,9 @@ GPU2 得分 = 17.75
 |-------------------------------|-----------------------------------------------------------------------|-----------|
 | `GPU_CORE_UTILIZATION_POLICY` | 算力限制策略：`default`（默认）、`force`（强制限制到 gpucores 以下）、`disable`（忽略算力限制，调试用） | `default` |
 | `CUDA_DISABLE_CONTROL`        | 设为 `true` 时禁用容器内 HAMi-Core，无资源隔离（调试用）                                 | `false`   |
+
+## 总结
+
+HAMI 的完整链路：Webhook 将 Pod 引入 hami-scheduler，Scheduler Extender 依据 Node Annotation 中的 GPU 规格做感知调度并将分配结果写回 Pod Annotation，Device Plugin 在 Allocate 时读取 Annotation、注入 libvgpu.so（即 HAMi-Core）和限额环境变量，最终由 HAMi-Core 在容器内拦截 CUDA API 完成软隔离。
+
+HAMI 的调度侧相对轻量，适合在线推理这类单任务独立调度的场景。如果是 AI 训练场景，需要 Gang Scheduling（多 Pod 全部就绪才开始）、队列管理、公平份额等批处理能力，可以考虑 [Volcano](https://github.com/volcano-sh/volcano) 配合 [volcano-vgpu-device-plugin](https://github.com/volcano-sh/devices)，两者的组合在 GPU 虚拟化基础上补齐了批调度能力。
