@@ -1,10 +1,20 @@
 ---
-title: HAMI：Kubernetes GPU 虚拟化调度
+title: Kubernetes GPU 调度与 HAMI 虚拟化原理
 linkTitle: HAMI
 cascade:
   type: docs
 weight: 1
 ---
+
+在 AI 推理场景中，一个常见的困境是：GPU 很贵，但大多数时候都是闲的。
+
+一个典型的推理服务往往只占用 GPU 20%~40% 的算力和少量显存，剩余资源就这样空转着。Kubernetes 的默认 GPU 调度模型偏偏是独占的——`nvidia.com/gpu: 1` 意味着整张卡归你，其他 Pod 一律等待。想让多个推理服务共享一张 GPU？标准 Device Plugin 做不到，因为它只能向调度器上报设备数量（整数），根本没有"显存配额"这个概念。
+
+于是出现了各种 GPU 共享方案。NVIDIA 官方的时间切片（Time-Slicing）可以让多个 Pod 同时被调度，但没有显存隔离，一个 Pod OOM 会拖垮整张卡上的所有任务。MIG 硬件分区有真正的隔离，但只有 A100、H100 这类数据中心级卡才支持。
+
+[HAMI](https://github.com/Project-HAMi/HAMi)（Heterogeneous AI Computing Virtualization Middleware）走了另一条路：**不改驱动、不改应用**，通过 CUDA API 劫持在软件层实现 GPU 虚拟化——多个 Pod 共享同一张物理 GPU，每个 Pod 只能"看到"自己申请的那部分显存，超额分配直接返回 OOM。这是一个 CNCF Sandbox 项目，前身为 `k8s-vGPU-scheduler`。
+
+本文先从 Kubernetes GPU 调度的原理讲起，理解默认模型的局限性，再深入 HAMI 的架构和实现，看它是如何绕过这些限制的。
 
 ## 1. Kubernetes GPU 调度原理
 
