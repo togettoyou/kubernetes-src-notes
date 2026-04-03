@@ -3,7 +3,7 @@ linkTitle: observability
 title: 可观测性
 cascade:
   type: docs
-weight: 8
+weight: 9
 ---
 
 [可观测性](https://www.redhat.com/zh-cn/topics/devops/what-is-observability)
