@@ -386,8 +386,6 @@ MiB < 12288 MiB，满足总量约束。
 
 ### HAMI 调度策略详解
 
-> 来源：https://project-hami.io/zh/docs/developers/scheduling（v2.8.0）
-
 HAMI 提供了两个维度的调度策略配置，分别作用于**节点选择**和**单节点内 GPU 卡选择**，两者正交组合，可覆盖多种资源分配偏好。
 
 #### 策略维度概览
