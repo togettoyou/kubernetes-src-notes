@@ -63,7 +63,7 @@ type MyPod struct {
 
 有了 CRD，kube-apiserver 侧的工作就完成了。接下来需要一个控制器持续监听这个资源，驱动调谐逻辑。根据对底层细节的掌控程度和开发效率的取舍，社区形成了三个层次的选择：直接使用 **client-go**、基于 **controller-runtime**、以及借助 **Kubebuilder / Operator SDK** 脚手架。
 
-## 方案一：直接使用 client-go
+## 直接使用 client-go
 
 client-go 是 Kubernetes 官方的 Go 客户端库，kube-controller-manager 自身就是用它来实现所有内置控制器的。直接使用 client-go 灵活度最高，也最接近 Kubernetes 控制器的底层实现。
 
@@ -377,7 +377,7 @@ Sync/Add/Update/Delete for Pod kube-system/coredns-6cc96b5c97-nfmp7
 ...
 ```
 
-## 方案二：使用 controller-runtime
+## 使用 controller-runtime
 
 [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) 是社区当前的主流选择，Kubebuilder 和 Operator SDK 生成的项目都基于它。
 
@@ -555,107 +555,79 @@ Sync/Add/Update/Delete for Pod kube-system/coredns-6cc96b5c97-nfmp7
 ...
 ```
 
-## 方案三：使用 Kubebuilder / Operator SDK
+## 使用 Kubebuilder / Operator SDK
 
-[Kubebuilder](https://github.com/kubernetes-sigs/kubebuilder) 和 [Operator SDK](https://github.com/operator-framework/operator-sdk) 是基于 controller-runtime 的代码脚手架工具，它们的核心价值在于 **代码生成**：通过分析 Go 类型上的 Marker 注解，自动生成 CRD YAML、RBAC 规则、Webhook 配置等大量重复性文件。
+[Kubebuilder](https://github.com/kubernetes-sigs/kubebuilder) 和 [Operator SDK](https://github.com/operator-framework/operator-sdk) 是基于 controller-runtime 的代码脚手架工具，运行时机制与方案二完全相同。它们的核心价值在于 **代码生成**：两条命令就能生成一个完整的 Operator 项目骨架，并通过 Marker 注解自动生成 CRD YAML、RBAC 规则等配置文件，省去大量重复劳动。以下以 Kubebuilder 为例。
 
 ### 初始化项目
 
 ```bash
-# 初始化项目，指定 domain（CRD group 的后缀）和 module 名
+# 初始化项目，指定 domain（CRD Group 的后缀）和 Go module 名
 kubebuilder init --project-name simple --domain controller.io --repo simple
 
-# 创建一个新的 API 类型和对应的 Controller 骨架
+# 生成 API 类型定义和 Controller 骨架
 kubebuilder create api --group simple --version v1 --kind MyPod
 ```
 
-执行上述命令后，Kubebuilder 会自动生成以下关键文件：
+执行后自动生成以下关键文件：
 
 ```
 simple/
 ├── api/v1/
-│   ├── mypod_types.go          # CRD 类型定义（开发者填写 Spec/Status 字段）
-│   └── zz_generated.deepcopy.go  # 自动生成的 DeepCopy 方法，无需手动维护
+│   ├── mypod_types.go             # CRD 类型定义，填写 Spec/Status 字段即可
+│   └── zz_generated.deepcopy.go  # 自动生成的 DeepCopy，无需手动维护
 ├── internal/controller/
-│   └── mypod_controller.go     # Controller 骨架（开发者在此实现 Reconcile 逻辑）
+│   └── mypod_controller.go       # Reconciler 骨架，实现 Reconcile 逻辑
 ├── config/
-│   ├── crd/                    # 由 make generate/manifests 自动生成的 CRD YAML
-│   └── rbac/                   # 由 Marker 注解自动生成的 RBAC 规则
-└── cmd/main.go                 # Manager 入口，通常无需修改
+│   ├── crd/                      # make manifests 自动生成的 CRD YAML
+│   └── rbac/                     # Marker 注解自动生成的 RBAC 规则
+└── cmd/main.go                   # Manager 入口，通常无需修改
 ```
 
 ### Marker 注解：用注释驱动代码生成
 
-Kubebuilder 最有特色的设计是 **Marker 注解**，即写在 Go 代码注释里的特殊指令，`controller-gen` 工具会读取这些指令并生成对应的文件。
+Kubebuilder 独有的设计是 **Marker 注解**——写在 Go 注释里的特殊指令，`controller-gen` 工具扫描这些注解后自动生成对应文件，开发者不再需要手写 CRD YAML 和 RBAC ClusterRole。
 
-**类型级 Marker**（写在结构体前）：
+写在类型上，控制 CRD 的生成行为：
 
 ```go
-// +kubebuilder:object:root=true       — 声明此类型是 CRD 根对象，生成 DeepCopyObject 接口实现
-// +kubebuilder:subresource:status     — 为此资源启用 status 子资源（status 更新走独立接口，避免冲突）
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-//                                     — 定制 kubectl get 输出的列
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 type MyPod struct { ... }
 ```
 
-**Controller 级 Marker**（写在 Reconcile 方法前）：
+写在 Reconcile 方法上，控制 RBAC 规则的生成：
 
 ```go
 // +kubebuilder:rbac:groups=simple.controller.io,resources=mypods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=simple.controller.io,resources=mypods/status,verbs=get;update;patch
 func (r *MyPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-    ...
+    myPod := &simplev1.MyPod{}
+
+    err := r.Client.Get(ctx, req.NamespacedName, myPod)
+    if err != nil {
+        if errors.IsNotFound(err) {
+            return ctrl.Result{}, nil
+        }
+        return ctrl.Result{}, err
+    }
+
+    // 在这里实现你的调谐逻辑
+    return ctrl.Result{}, nil
 }
 ```
 
-执行 `make manifests` 后，这些 Marker 会被 `controller-gen` 解析，自动生成 CRD YAML 和 RBAC ClusterRole，开发者不再需要手写这些枯燥的配置。
+注解写好后，执行 `make manifests` 即可生成所有配置文件。
 
-### main.go：自动注册 CRD Scheme
+完整代码见：[controller-operator/kubebuilder/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/controller-operator/kubebuilder/simple)
 
-使用 Kubebuilder 时，`main.go` 中有一个重要步骤——将自定义资源类型注册到 Scheme：
+## 总结
 
-```go
-// cmd/main.go
+Operator 模式的本质是一个持续运行的控制循环：观察资源的实际状态，与期望状态对比，执行操作让两者趋于一致。这套逻辑在 Kubernetes 的所有内置控制器中都是相同的，CRD + Controller 只是把这个能力开放给了开发者。
 
-var scheme = runtime.NewScheme()
+三种开发方式本质上是同一件事的不同抽象层次。**client-go** 让你把每一个零件都摸得清清楚楚，适合对底层有掌控需求的场景，kube-controller-manager 本身就是这么写的；**controller-runtime** 把 Informer、WorkQueue、缓存同步这些基础设施封装掉，你只需要实现一个 `Reconcile` 方法，这是当前社区最主流的选择；**Kubebuilder / Operator SDK** 在 controller-runtime 之上再加一层脚手架，两条命令生成项目骨架，Marker 注解自动生成 CRD YAML 和 RBAC 规则，适合快速启动新项目。
 
-func init() {
-    // 注册 Kubernetes 内置类型（Pod、Deployment 等）
-    utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-    // 注册自定义类型（MyPod 等）
-    utilruntime.Must(simplev1.AddToScheme(scheme))
-}
-
-func main() {
-    mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-        Scheme:                 scheme,
-        MetricsBindAddress:     ":8080",
-        HealthProbeBindAddress: ":8081",
-        LeaderElection:         enableLeaderElection,
-        LeaderElectionID:       "1666807f.controller.io",
-    })
-    // ...
-    mgr.Start(ctrl.SetupSignalHandler())
-}
-```
-
-Scheme 是 controller-runtime 的类型注册表，它负责在 Go 类型和 Kubernetes API 的 `apiVersion/kind` 字符串之间做双向映射。只有注册到 Scheme 的类型，client 才能正确地序列化和反序列化。
-
-代码示例：[controller-operator/kubebuilder/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/controller-operator/kubebuilder/simple)
-
-## 三种方案横向对比
-
-| 维度 | client-go | controller-runtime | Kubebuilder / Operator SDK |
-|------|-----------|-------------------|---------------------------|
-| **抽象层次** | 底层，手动组装 Informer + WorkQueue | 中层，专注实现 Reconcile | 高层，脚手架生成大量样板代码 |
-| **代码量** | 最多 | 中等 | 最少 |
-| **灵活性** | 最高 | 高 | 中（基于 controller-runtime） |
-| **CRD 支持** | 需手写 YAML | 需手写 YAML | 自动从 Go 类型生成 |
-| **RBAC 生成** | 需手写 | 需手写 | Marker 注解自动生成 |
-| **典型使用者** | kube-controller-manager 等核心组件 | 社区主流 Operator | 快速搭建新 Operator 项目 |
-| **代表项目** | kube-scheduler、kube-controller-manager | cert-manager、Argo CD | 大量企业内部 Operator |
-
-理解了 controller-runtime 的核心概念，Kubebuilder 和 Operator SDK 就很容易上手——它们不引入新的运行时概念，只是让项目初始化和配置生成更省力。
+三者并不互斥。理解了 client-go 的 Informer 机制，你才能真正看懂 controller-runtime 在替你做什么；理解了 controller-runtime，Kubebuilder 生成的代码就没有任何神秘之处。建议的学习路径也正是如此：从 client-go 入手建立底层认知，再用 controller-runtime 提效，最后用 Kubebuilder 快速落地生产项目。
 
 ## 微信公众号
 
