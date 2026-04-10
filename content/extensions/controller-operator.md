@@ -71,33 +71,26 @@ client-go 是 Kubernetes 官方的 Go 客户端库，kube-controller-manager 自
 
 用 client-go 构建一个控制器，需要三个核心组件配合：
 
-```
-┌─────────────────────────────────────────────────────┐
-│                     kube-apiserver                  │
-└──────────────────────┬──────────────────────────────┘
-                  List/Watch │
-                             ▼
-┌─────────────────────────────────────────────────────┐
-│  Informer（本地缓存）                                 │
-│  · 启动时 List 全量同步                               │
-│  · 之后 Watch 增量更新                                │
-│  · 资源变更时触发 EventHandler                        │
-└──────────┬──────────────────────────────────────────┘
-           │ 将变更对象的 key 放入队列
-           ▼
-┌─────────────────────────────────────────────────────┐
-│  WorkQueue（工作队列）                                │
-│  · 自动去重：同一个 key 只保留一份                     │
-│  · 失败重试：内置限速退避，不会无限重试                 │
-└──────────┬──────────────────────────────────────────┘
-           │ worker 取出 key 处理
-           ▼
-┌─────────────────────────────────────────────────────┐
-│  Controller（调谐循环）                               │
-│  · 从队列取 key                                      │
-│  · 从 Informer 缓存读取最新对象                       │
-│  · 执行调谐逻辑（你的业务代码在这里）                  │
-└─────────────────────────────────────────────────────┘
+```plantuml
+@startuml
+!theme plain
+skinparam defaultTextAlignment center
+skinparam rectangleBorderColor #888888
+skinparam rectangleBorderThickness 1.5
+skinparam arrowColor #555555
+
+rectangle "kube-apiserver" as api #E3F2FD
+
+rectangle "Informer（本地缓存）\n启动时 List 全量同步\n之后 Watch 增量更新" as informer #BBDEFB
+
+rectangle "WorkQueue（工作队列）\n自动去重 · 失败限速重试" as queue #C8E6C9
+
+rectangle "Controller（调谐循环）\n从缓存读取最新对象\n执行调谐逻辑" as controller #FFE0B2
+
+api -down-> informer : List / Watch
+informer -down-> queue : 变更对象的 key
+queue -down-> controller : worker 取出 key
+@enduml
 ```
 
 Informer 负责感知变化，WorkQueue 负责可靠传递，Controller 负责处理。三者各司其职，这套模式在 Kubernetes 的所有内置控制器中几乎一模一样。
