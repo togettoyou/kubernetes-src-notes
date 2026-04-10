@@ -379,77 +379,181 @@ Sync/Add/Update/Delete for Pod kube-system/coredns-6cc96b5c97-nfmp7
 
 ## 方案二：使用 controller-runtime
 
-[controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) 是社区当前的主流选择，Kubebuilder 和 Operator SDK 生成的项目都基于它。它在 client-go 之上提供了更高层次的抽象，将开发者从繁琐的基础设施搭建中解放出来，专注于业务逻辑。
+[controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) 是社区当前的主流选择，Kubebuilder 和 Operator SDK 生成的项目都基于它。
 
-controller-runtime 的核心概念只有三个：**Manager**、**Controller**、**Reconciler**，分别对应生命周期管理、资源监听和调谐逻辑。
+对比方案一，controller-runtime 最大的变化是：Informer 的创建、WorkQueue 的管理、缓存同步等待、失败重试——这些全部由框架内部处理，开发者只需要实现一个接口：`Reconciler`。
 
-### Manager：统一的生命周期管理
+```plantuml
+@startuml
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
 
-Manager 是整个 Operator 的入口，负责管理所有 Controller 的生命周期，并内置了以下能力：
+participant "kube-apiserver" as api
+box "controller-runtime（框架内部）" #EEF5FF
+    participant "Cache\n（共享 Informer 缓存）" as cache
+    participant "Controller\n（内置 WorkQueue）" as ctrl
+end box
+participant "Reconciler\n（你的业务代码）" as reconciler
 
-- **Leader Election**：多副本部署时，确保同一时刻只有一个 Pod 在主动调谐，其余处于热备状态
-- **健康检查端点**：自动暴露 `/healthz` 和 `/readyz` 接口，供 Kubernetes 探针使用
-- **Metrics 接口**：自动暴露 Prometheus 格式的指标
-- **共享 Cache**：内部维护 Informer 缓存，所有 Controller 共用，避免重复 Watch
+== 启动阶段 ==
+ctrl -> cache : 注册监听 Pod 资源
+cache -> api : List / Watch
 
-```go
-// main.go
+== 资源变更时 ==
+api -> cache : Watch 事件（Pod 新增 / 更新 / 删除）
+cache -> cache : 更新本地缓存
+cache -> ctrl : 通知变更
+ctrl -> ctrl : key 入队（自动去重）
+ctrl -> reconciler : Reconcile(namespace/name)
 
-// 创建 Manager，传入集群配置和选项
-mgr, err := ctrl.NewManager(cfg, ctrl.Options{})
-if err != nil {
-    panic(err)
-}
-
-// 向 Manager 注册控制器，声明关注 Pod 资源
-err = ctrl.NewControllerManagedBy(mgr).
-    Named("pod-controller").
-    For(&corev1.Pod{}).         // 监听 Pod 的增删改事件
-    Complete(&podReconciler{client: mgr.GetClient()})
-
-// 启动 Manager（阻塞，直到收到终止信号）
-mgr.Start(context.Background())
+== Reconcile 内部 ==
+reconciler -> cache : client.Get()（读走缓存）
+cache --> reconciler : 返回最新 Pod 对象
+reconciler -> api : client.Update/Patch/Create()（写走 API Server）
+@enduml
 ```
 
-### Reconciler：只需关注"当前状态是什么"
-
-开发者唯一需要实现的接口是 `Reconciler`，它只有一个方法：
+### main.go：三行核心代码
 
 ```go
-// controller.go
+package main
+
+import (
+	"context"
+	"flag"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
+)
+
+var (
+	host  string
+	token string
+)
+
+func init() {
+	flag.StringVar(&host, "host", "", "连接自定义集群")
+	flag.StringVar(&token, "token", "", "连接自定义集群的token")
+}
+
+func main() {
+	flag.Parse()
+
+	// 初始化集群连接配置（同方案一）
+	var (
+		cfg *rest.Config
+		err error
+	)
+	if host != "" && token != "" {
+		cfg = &rest.Config{
+			Host:        host,
+			BearerToken: token,
+			TLSClientConfig: rest.TLSClientConfig{
+				Insecure: true,
+			},
+		}
+	} else {
+		cfg, err = rest.InClusterConfig()
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	// 第一步：创建 Manager
+	// Manager 是整个 Operator 的入口，内部自动管理 Informer 缓存、
+	// WorkQueue、Leader Election、健康检查端点等，无需手动搭建。
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{})
+	if err != nil {
+		panic(err)
+	}
+
+	// 第二步：向 Manager 注册控制器
+	// For(&corev1.Pod{}) 声明要监听 Pod 资源的增删改事件，
+	// Complete 传入实现了 Reconciler 接口的结构体。
+	err = ctrl.NewControllerManagedBy(mgr).
+		Named("pod-controller").
+		For(&corev1.Pod{}).
+		Complete(&podReconciler{client: mgr.GetClient()})
+	if err != nil {
+		panic(err)
+	}
+
+	// 第三步：启动 Manager（阻塞，直到收到终止信号）
+	if err := mgr.Start(context.Background()); err != nil {
+		panic(err)
+	}
+}
+```
+
+相比方案一的 `main.go`，这里的代码量少了大半：不需要手动创建 SharedInformerFactory，不需要手动创建 WorkQueue，不需要手动注册 EventHandler——这些全部由 `ctrl.NewControllerManagedBy` 在内部完成。
+
+### controller.go：只需实现 Reconcile
+
+开发者唯一需要实现的是 `Reconciler` 接口，它只有一个方法 `Reconcile`：
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+)
 
 type podReconciler struct {
-    client client.Client // controller-runtime 提供的统一客户端（读走缓存，写走 API Server）
+	// controller-runtime 提供的统一客户端
+	// 读操作走本地缓存，写操作发往 kube-apiserver
+	client client.Client
 }
 
-// 确保 podReconciler 实现了 reconcile.Reconciler 接口（编译期检查）
+// 编译期检查：确保 podReconciler 实现了 reconcile.Reconciler 接口
 var _ reconcile.Reconciler = &podReconciler{}
 
+// Reconcile 在 Pod 发生变更时被框架自动调用
+// request 只包含资源的 namespace 和 name，不包含对象本身
 func (r *podReconciler) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-    pod := &corev1.Pod{}
+	logger := klog.FromContext(ctx)
 
-    // 从缓存读取目标 Pod 的当前状态
-    err := r.client.Get(ctx, request.NamespacedName, pod)
-    if err != nil {
-        if errors.IsNotFound(err) {
-            // Pod 已删除，无需处理
-            return reconcile.Result{}, nil
-        }
-        return reconcile.Result{}, err
-    }
+	pod := &corev1.Pod{}
 
-    // 在这里实现调谐逻辑
-    fmt.Printf("Reconciling Pod %s/%s\n", pod.GetNamespace(), pod.GetName())
+	// 用 request 中的 namespace/name 从缓存中取出最新的 Pod 对象
+	err := r.client.Get(ctx, request.NamespacedName, pod)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Pod 已被删除，对应的调谐无需处理
+			logger.Error(nil, "Could not find Pod", "namespacedName", request.NamespacedName)
+			return reconcile.Result{}, nil
+		}
+		return reconcile.Result{}, err
+	}
 
-    // reconcile.Result{} 表示调谐成功，无需重新入队
-    // reconcile.Result{RequeueAfter: time.Minute} 表示 1 分钟后重新调谐
-    return reconcile.Result{}, nil
+	// =============================================
+	// 在这里实现你的调谐逻辑
+	// =============================================
+	fmt.Printf("Sync/Add/Update/Delete for Pod %s/%s\n", pod.GetNamespace(), pod.GetName())
+
+	// reconcile.Result{} 表示调谐成功，无需重新触发
+	// 如需定时复查，可返回 reconcile.Result{RequeueAfter: time.Minute}
+	return reconcile.Result{}, nil
 }
 ```
 
-对比 client-go 方案，差异一目了然：Informer 的创建、WorkQueue 的管理、缓存同步等待、重试逻辑——这些全部由 controller-runtime 内部处理，开发者只需要关注 `Reconcile` 方法里"拿到资源对象后做什么"。
+注意 `Reconcile` 的入参是 `reconcile.Request`，它只携带 `namespace/name`，不包含对象本身。这是有意为之的设计——框架保证调用 `Reconcile` 时缓存已是最新，开发者应该主动用 `client.Get` 取最新状态，而不是依赖事件时刻的快照。如果 `Get` 返回 `NotFound`，说明对象已被删除，按需处理即可。
 
-代码示例：[controller-operator/controller-runtime/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/controller-operator/controller-runtime/simple)
+完整代码见：[controller-operator/controller-runtime/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/controller-operator/controller-runtime/simple)
+
+```bash
+$ go run . --host=https://127.0.0.1:6443 --token=<your-token>
+Sync/Add/Update/Delete for Pod default/nginx
+Sync/Add/Update/Delete for Pod kube-system/coredns-6cc96b5c97-nfmp7
+...
+```
 
 ## 方案三：使用 Kubebuilder / Operator SDK
 
