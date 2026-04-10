@@ -381,7 +381,7 @@ Sync/Add/Update/Delete for Pod kube-system/coredns-6cc96b5c97-nfmp7
 
 [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) 是社区当前的主流选择，Kubebuilder 和 Operator SDK 生成的项目都基于它。
 
-对比方案一，controller-runtime 最大的变化是：Informer 的创建、WorkQueue 的管理、缓存同步等待、失败重试——这些全部由框架内部处理，开发者只需要实现一个接口：`Reconciler`。
+对比 client-go 方案，controller-runtime 最大的变化是：Informer 的创建、WorkQueue 的管理、缓存同步等待、失败重试——这些全部由框架内部处理，开发者只需要实现一个接口：`Reconciler`。
 
 ```plantuml
 @startuml
@@ -440,7 +440,7 @@ func init() {
 func main() {
 	flag.Parse()
 
-	// 初始化集群连接配置（同方案一）
+	// 初始化集群连接配置（同 client-go 方案）
 	var (
 		cfg *rest.Config
 		err error
@@ -486,7 +486,7 @@ func main() {
 }
 ```
 
-相比方案一的 `main.go`，这里的代码量少了大半：不需要手动创建 SharedInformerFactory，不需要手动创建 WorkQueue，不需要手动注册 EventHandler——这些全部由 `ctrl.NewControllerManagedBy` 在内部完成。
+相比 client-go 的 `main.go`，这里的代码量少了大半：不需要手动创建 SharedInformerFactory，不需要手动创建 WorkQueue，不需要手动注册 EventHandler——这些全部由 `ctrl.NewControllerManagedBy` 在内部完成。
 
 ### controller.go：只需实现 Reconcile
 
@@ -527,7 +527,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, request reconcile.Request
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Pod 已被删除，对应的调谐无需处理
-			logger.Error(nil, "Could not find Pod", "namespacedName", request.NamespacedName)
+			logger.Error(nil, "Could not find Pod", request.NamespacedName)
 			return reconcile.Result{}, nil
 		}
 		return reconcile.Result{}, err
@@ -557,7 +557,7 @@ Sync/Add/Update/Delete for Pod kube-system/coredns-6cc96b5c97-nfmp7
 
 ## 使用 Kubebuilder / Operator SDK
 
-[Kubebuilder](https://github.com/kubernetes-sigs/kubebuilder) 和 [Operator SDK](https://github.com/operator-framework/operator-sdk) 是基于 controller-runtime 的代码脚手架工具，运行时机制与方案二完全相同。它们的核心价值在于 **代码生成**：两条命令就能生成一个完整的 Operator 项目骨架，并通过 Marker 注解自动生成 CRD YAML、RBAC 规则等配置文件，省去大量重复劳动。以下以 Kubebuilder 为例。
+[Kubebuilder](https://github.com/kubernetes-sigs/kubebuilder) 和 [Operator SDK](https://github.com/operator-framework/operator-sdk) 是基于 controller-runtime 的代码脚手架工具，运行时机制与 controller-runtime 完全相同。它们的核心价值在于 **代码生成**：两条命令就能生成一个完整的 Operator 项目骨架，并通过 Marker 注解自动生成 CRD YAML、RBAC 规则等配置文件，省去大量重复劳动。以下以 Kubebuilder 为例。
 
 ### 初始化项目
 
