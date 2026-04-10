@@ -1,5 +1,5 @@
 ---
-title: API 层 | 控制器和 Operator 模式
+title: API 层 | CRD + Controller（Operator 模式）
 ---
 
 在 Kubernetes 的所有扩展机制中，**CRD + Controller（Operator 模式）** 是使用最广泛的一种。它的核心思想是：通过 CustomResourceDefinition 向集群声明一种新的资源类型，再配合一个自定义控制器，持续监听这个资源的状态，将实际状态驱动向期望状态收敛。
@@ -33,11 +33,9 @@ title: API 层 | 控制器和 Operator 模式
 
 一旦创建了 CRD，kube-apiserver 的 APIExtensionsServer 组件会自动为这个新资源类型提供标准的 CRUD 接口，数据同样持久化到 etcd 中，`kubectl get/apply/delete` 全部开箱即用。
 
-CRD 对应的 Go 类型定义遵循固定的结构，以 Kubebuilder 生成的 `MyPod` 为例：
+CRD 对应的 Go 类型定义遵循固定的结构：
 
 ```go
-// api/v1/mypod_types.go
-
 // MyPodSpec 定义 MyPod 的期望状态（用户声明的目标）
 type MyPodSpec struct {
     Foo string `json:"foo,omitempty"`
@@ -46,9 +44,6 @@ type MyPodSpec struct {
 // MyPodStatus 定义 MyPod 的实际状态（控制器观察并写回的结果）
 type MyPodStatus struct {
 }
-
-// +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 
 // MyPod 是 mypods API 的核心类型
 type MyPod struct {
@@ -66,149 +61,328 @@ type MyPod struct {
 - **Status**：实际状态，由控制器写回，记录观察到的真实情况
 - **TypeMeta + ObjectMeta**：每个 Kubernetes 资源都必须内嵌这两个字段，分别存储 `apiVersion/kind` 和 `name/namespace/labels` 等元信息
 
-注释 `// +kubebuilder:object:root=true` 和 `// +kubebuilder:subresource:status` 是 Kubebuilder 的 **Marker 注解**，后面会详细介绍它们的作用。
+有了 CRD，kube-apiserver 侧的工作就完成了。接下来需要一个控制器持续监听这个资源，驱动调谐逻辑。根据对底层细节的掌控程度和开发效率的取舍，社区形成了三个层次的选择：直接使用 **client-go**、基于 **controller-runtime**、以及借助 **Kubebuilder / Operator SDK** 脚手架。
 
 ## 方案一：直接使用 client-go
 
 client-go 是 Kubernetes 官方的 Go 客户端库，kube-controller-manager 自身就是用它来实现所有内置控制器的。直接使用 client-go 灵活度最高，也最接近 Kubernetes 控制器的底层实现。
 
-### Informer：带本地缓存的监听机制
+### 整体思路
 
-直接用 `list/watch` 轮询 kube-apiserver 代价太高。client-go 提供了 **Informer** 机制来解决这个问题：
+用 client-go 构建一个控制器，需要三个核心组件配合：
 
-Informer 在本地内存中维护一份资源的完整缓存（Store），启动时先通过 List 接口全量同步，之后通过 Watch 接口接收增量事件，保持缓存与 etcd 的实时一致。控制器所有的读操作都命中本地缓存，不会给 kube-apiserver 带来压力。
-
-**SharedInformerFactory** 是批量管理 Informer 的工厂，它确保同一种资源的 Informer 只创建一个实例，在多个控制器之间共享：
-
-```go
-// main.go
-
-// 连接集群
-clientSet, err := kubernetes.NewForConfig(cfg)
-
-// 创建 SharedInformerFactory，resync 周期为 0（不强制全量 re-list）
-sharedInformerFactory := informers.NewSharedInformerFactory(clientSet, 0)
-
-// 获取 Pod 的 Informer
-podInformer := sharedInformerFactory.Core().V1().Pods()
+```
+┌─────────────────────────────────────────────────────┐
+│                     kube-apiserver                  │
+└──────────────────────┬──────────────────────────────┘
+                  List/Watch │
+                             ▼
+┌─────────────────────────────────────────────────────┐
+│  Informer（本地缓存）                                 │
+│  · 启动时 List 全量同步                               │
+│  · 之后 Watch 增量更新                                │
+│  · 资源变更时触发 EventHandler                        │
+└──────────┬──────────────────────────────────────────┘
+           │ 将变更对象的 key 放入队列
+           ▼
+┌─────────────────────────────────────────────────────┐
+│  WorkQueue（工作队列）                                │
+│  · 自动去重：同一个 key 只保留一份                     │
+│  · 失败重试：内置限速退避，不会无限重试                 │
+└──────────┬──────────────────────────────────────────┘
+           │ worker 取出 key 处理
+           ▼
+┌─────────────────────────────────────────────────────┐
+│  Controller（调谐循环）                               │
+│  · 从队列取 key                                      │
+│  · 从 Informer 缓存读取最新对象                       │
+│  · 执行调谐逻辑（你的业务代码在这里）                  │
+└─────────────────────────────────────────────────────┘
 ```
 
-### WorkQueue：可靠的事件分发
+Informer 负责感知变化，WorkQueue 负责可靠传递，Controller 负责处理。三者各司其职，这套模式在 Kubernetes 的所有内置控制器中几乎一模一样。
 
-Informer 捕获到资源变更事件后，不应该直接在事件回调里执行业务逻辑——那样如果处理失败就没有重试机会，并发也难以控制。
+### main.go：串联三个组件
 
-标准做法是将变更对象的 key（格式为 `namespace/name`）放入一个 **工作队列（WorkQueue）**，由独立的 worker goroutine 从队列中取出并处理：
+`main.go` 的职责是初始化这三个组件，并把它们拼装在一起：
 
 ```go
-// main.go
+package main
 
-// 创建限速工作队列，内置重试退避，避免频繁失败后的无限重试
-queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+import (
+	"context"
+	"flag"
 
-// 注册事件回调，将 key 推入队列
-podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-    AddFunc: func(obj interface{}) {
-        key, err := cache.MetaNamespaceKeyFunc(obj)
-        if err == nil {
-            queue.Add(key)
-        }
-    },
-    UpdateFunc: func(oldObj, newObj interface{}) {
-        key, err := cache.MetaNamespaceKeyFunc(newObj)
-        if err == nil {
-            queue.Add(key)
-        }
-    },
-    DeleteFunc: func(obj interface{}) {
-        key, err := cache.MetaNamespaceKeyFunc(obj)
-        if err == nil {
-            queue.Add(key)
-        }
-    },
-})
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
+)
+
+var (
+	host  string
+	token string
+)
+
+func init() {
+	flag.StringVar(&host, "host", "", "连接自定义集群")
+	flag.StringVar(&token, "token", "", "连接自定义集群的token")
+}
+
+func main() {
+	flag.Parse()
+
+	// 第一步：初始化集群连接配置
+	// 支持两种方式：
+	//   · 指定 host + token（用于集群外本地开发调试）
+	//   · 不指定参数，自动读取 Pod 内的 ServiceAccount 凭证（用于部署在集群内）
+	var (
+		cfg *rest.Config
+		err error
+	)
+	if host != "" && token != "" {
+		cfg = &rest.Config{
+			Host:        host,
+			BearerToken: token,
+			TLSClientConfig: rest.TLSClientConfig{
+				Insecure: true,
+			},
+		}
+	} else {
+		cfg, err = rest.InClusterConfig()
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	// 第二步：创建 ClientSet，用于与 kube-apiserver 通信
+	clientSet, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		panic(err)
+	}
+
+	// 第三步：创建 SharedInformerFactory
+	// 它是 Informer 的工厂，负责管理所有 Informer 实例。
+	// 第二个参数 resyncPeriod 为 0，表示不强制定期全量 re-list，
+	// 只依赖 Watch 的增量事件驱动更新。
+	sharedInformerFactory := informers.NewSharedInformerFactory(clientSet, 0)
+
+	// 第四步：从工厂中获取 Pod Informer
+	// Informer 会在本地内存中维护一份 Pod 的完整缓存，
+	// 控制器后续所有的读操作都走这份缓存，不直接请求 kube-apiserver。
+	podInformer := sharedInformerFactory.Core().V1().Pods()
+
+	// 第五步：创建工作队列
+	// NewRateLimitingQueue 内置了限速器，失败重试时会自动退避，
+	// 避免某个 key 处理失败后被无限制地高频重试。
+	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+
+	// 第六步：给 Informer 注册事件回调
+	// 当 Pod 发生新增、更新、删除时，回调函数会被触发。
+	// 这里不直接处理业务逻辑，只把变更对象的 key（"namespace/name" 格式）
+	// 推入工作队列，交给 worker goroutine 异步处理。
+	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			key, err := cache.MetaNamespaceKeyFunc(obj)
+			if err == nil {
+				queue.Add(key)
+			}
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			key, err := cache.MetaNamespaceKeyFunc(newObj)
+			if err == nil {
+				queue.Add(key)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			key, err := cache.MetaNamespaceKeyFunc(obj)
+			if err == nil {
+				queue.Add(key)
+			}
+		},
+	})
+
+	// 第七步：初始化控制器，传入队列和 Informer
+	controller := NewController(queue, podInformer.Lister(), podInformer.Informer())
+
+	ctx := context.Background()
+
+	// 第八步：启动 Informer
+	// Start 会在后台启动所有已创建的 Informer，开始 List/Watch。
+	sharedInformerFactory.Start(ctx.Done())
+
+	// 第九步：启动控制器（1 个 worker goroutine）
+	go controller.Run(ctx, 1)
+
+	// 阻塞主 goroutine，保持进程运行
+	select {}
+}
 ```
 
-WorkQueue 有一个关键特性：**去重**，如果同一个 key 在处理完成之前被多次入队，队列中只会保留一份。这与水平触发的设计理念一脉相承——不管触发了多少次事件，最终只需要处理一次当前状态即可。
+这里有一个设计值得留意：事件回调里只做了一件事——把对象的 key 推入队列，并没有直接处理业务逻辑。原因是，如果在回调里直接处理，一旦失败就没有重试机会，并发也难以控制。把 key 推入队列后，WorkQueue 会负责去重和失败重试，实际处理由 worker 串行或并发消费。
 
-### Controller：组装控制循环
+### controller.go：实现调谐循环
 
-有了 Informer 缓存和 WorkQueue，控制器的主体逻辑就是标准的"从队列取 key → 从缓存读状态 → 执行调谐"循环：
+控制器的核心是一个持续运行的消费循环，不断从队列取 key，然后执行调谐逻辑：
 
 ```go
-// controller.go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
+	v1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
+)
 
 type Controller struct {
-    workqueue workqueue.RateLimitingInterface // 工作队列
-    lister    v1.PodLister                   // 从 Informer 本地缓存读取 Pod
-    informer  cache.Controller               // 用于等待缓存同步完成
+	workqueue workqueue.RateLimitingInterface // 工作队列
+	lister    v1.PodLister                   // 从 Informer 本地缓存读取 Pod（不发起网络请求）
+	informer  cache.Controller               // 用于等待缓存首次同步完成
 }
 
+func NewController(
+	workqueue workqueue.RateLimitingInterface,
+	lister v1.PodLister,
+	informer cache.Controller) *Controller {
+	return &Controller{
+		workqueue: workqueue,
+		lister:    lister,
+		informer:  informer,
+	}
+}
+
+// Run 启动控制器，workers 指定并发处理的 goroutine 数量
 func (c *Controller) Run(ctx context.Context, workers int) {
-    defer c.workqueue.ShutDown()
+	defer utilruntime.HandleCrash() // 捕获 panic，避免整个进程崩溃
+	defer c.workqueue.ShutDown()    // 退出时关闭队列，通知 worker 停止
 
-    // 等待 Informer 完成首次全量同步，确保本地缓存已就绪
-    if ok := cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced); !ok {
-        return
-    }
+	logger := klog.FromContext(ctx)
+	logger.Info("Starting controller")
 
-    // 启动指定数量的 worker goroutine 并发处理队列
-    for i := 0; i < workers; i++ {
-        go wait.UntilWithContext(ctx, c.runWorker, time.Second)
-    }
-    <-ctx.Done()
+	// 关键：等待 Informer 完成首次全量同步
+	// 控制器启动时，Informer 需要先从 kube-apiserver List 一次全量数据，
+	// 建立好本地缓存后，才能开始处理事件。
+	// 如果不等待这一步，worker 可能从缓存里读不到数据，导致误判。
+	logger.Info("Waiting for informer caches to sync")
+	if ok := cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced); !ok {
+		utilruntime.HandleError(fmt.Errorf("failed to wait for caches to sync"))
+		return
+	}
+
+	logger.Info("Starting workers", "count", workers)
+	// 启动 workers 个 goroutine，每个都在持续调用 runWorker
+	// wait.UntilWithContext 确保 runWorker 退出后会自动重启（间隔 1 秒），保证健壮性
+	for i := 0; i < workers; i++ {
+		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+	}
+
+	logger.Info("Started workers")
+	<-ctx.Done() // 阻塞，直到收到退出信号
+	logger.Info("Shutting down workers")
 }
 
+// runWorker 持续调用 processNextWorkItem，直到队列关闭
+func (c *Controller) runWorker(ctx context.Context) {
+	for c.processNextWorkItem(ctx) {
+	}
+}
+
+// processNextWorkItem 从队列取出一个 key 并处理，返回 false 表示队列已关闭
 func (c *Controller) processNextWorkItem(ctx context.Context) bool {
-    key, shutdown := c.workqueue.Get()
-    if shutdown {
-        return false
-    }
-    defer c.workqueue.Done(key) // 标记本次处理完成
+	// Get 会阻塞，直到队列中有新的 key 可处理
+	key, shutdown := c.workqueue.Get()
+	if shutdown {
+		return false
+	}
+	// Done 必须在处理结束后调用，告知队列这个 key 已处理完毕。
+	// 只有调用 Done 之后，相同 key 才能再次进入队列被处理。
+	defer c.workqueue.Done(key)
 
-    err := c.syncHandler(key.(string))
-    c.handleErr(ctx, err, key)
-    return true
+	err := c.syncHandler(key.(string))
+	c.handleErr(ctx, err, key)
+	return true
 }
 
+// syncHandler 是真正执行调谐的地方
+// 参数 key 是资源的唯一标识，格式为 "namespace/name"
 func (c *Controller) syncHandler(key string) error {
-    namespace, name, err := cache.SplitMetaNamespaceKey(key)
-    if err != nil {
-        return nil
-    }
+	// 从 key 中解析出 namespace 和 name
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
+		return nil
+	}
 
-    // 从 Informer 本地缓存读取最新状态（不发起网络请求）
-    pod, err := c.lister.Pods(namespace).Get(name)
-    if err != nil {
-        if errors.IsNotFound(err) {
-            // 对象已删除，key 已无效，忽略即可
-            return nil
-        }
-        return err
-    }
+	// 从 Informer 本地缓存读取 Pod 的当前状态（不发起网络请求）
+	pod, err := c.lister.Pods(namespace).Get(name)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Pod 已经被删除，对应的 key 已无意义，直接忽略
+			utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
+			return nil
+		}
+		return err
+	}
 
-    // 在这里实现调谐逻辑：比对期望与实际状态，执行相应操作
-    fmt.Printf("Reconciling Pod %s/%s\n", pod.GetNamespace(), pod.GetName())
-    return nil
+	// =============================================
+	// 在这里实现你的调谐逻辑
+	// 读取 pod.Spec（期望状态）和 pod.Status（实际状态），
+	// 执行相应的操作，让实际状态向期望状态收敛。
+	// =============================================
+	fmt.Printf("Sync/Add/Update/Delete for Pod %s/%s\n", pod.GetNamespace(), pod.GetName())
+
+	return nil
 }
 
+// handleErr 处理调谐失败的情况，决定是重试还是放弃
 func (c *Controller) handleErr(ctx context.Context, err error, key interface{}) {
-    if err == nil {
-        c.workqueue.Forget(key) // 处理成功，清除重试计数
-        return
-    }
-    if c.workqueue.NumRequeues(key) < 3 {
-        // 失败次数未达上限，重新入队（限速退避）
-        c.workqueue.AddRateLimited(key)
-        return
-    }
-    // 超过重试上限，放弃处理
-    c.workqueue.Forget(key)
+	if err == nil {
+		// 处理成功，清除这个 key 的重试计数
+		c.workqueue.Forget(key)
+		return
+	}
+
+	logger := klog.FromContext(ctx)
+
+	// 失败次数不超过 3 次，重新入队等待重试
+	// AddRateLimited 会按照限速器的配置（默认指数退避）延迟重新入队，
+	// 避免短时间内对同一个 key 反复处理
+	if c.workqueue.NumRequeues(key) < 3 {
+		logger.Info("Error syncing, will retry", "key", key, "err", err)
+		c.workqueue.AddRateLimited(key)
+		return
+	}
+
+	// 超过重试上限，彻底放弃这个 key
+	c.workqueue.Forget(key)
+	utilruntime.HandleError(err)
+	logger.Info("Dropping key out of the queue", "key", key, "err", err)
 }
 ```
 
-可以看到，直接使用 client-go 需要自己组装 Informer、WorkQueue、Controller 这三个核心组件，并手动处理缓存同步、重试退避、优雅关闭等细节。这正是 controller-runtime 出现的动机。
+`syncHandler` 是整个控制器最核心的地方，也是唯一需要根据业务需求定制的函数。它拿到的是资源对象的当前快照，在这里对比 `Spec`（期望状态）和 `Status`（实际状态），然后执行相应的操作——创建子资源、调用外部 API、更新 Status 等等，最终让实际状态向期望状态收敛。
 
-代码示例：[controller-operator/client-go/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/controller-operator/client-go/simple)
+完整代码见：[controller-operator/client-go/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/controller-operator/client-go/simple)
+
+```bash
+$ go run . --host=https://127.0.0.1:6443 --token=<your-token>
+I0410 21:30:02.431343   21951 controller.go:39] "Starting controller"
+I0410 21:30:02.431456   21951 controller.go:40] "Waiting for informer caches to sync"
+I0410 21:30:02.532597   21951 controller.go:47] "Starting workers" count=1
+I0410 21:30:02.532626   21951 controller.go:53] "Started workers"
+Sync/Add/Update/Delete for Pod default/nginx
+Sync/Add/Update/Delete for Pod kube-system/coredns-6cc96b5c97-nfmp7
+...
+```
 
 ## 方案二：使用 controller-runtime
 
