@@ -106,7 +106,7 @@ api -> webhook : POST /validating\nAdmissionReview（含变更后的对象）
 webhook --> api : AdmissionResponse\n（allowed: true/false）
 
 alt allowed: false
-    api --> client : 403 Forbidden（附带 Result.Reason）
+    api --> client : 4xx（由 result.Code 决定）
 else allowed: true
     api -> api : 持久化到 etcd
     api --> client : 201 Created / 200 OK
