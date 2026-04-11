@@ -1,5 +1,6 @@
 ---
 title: API 层 | CRD + Controller（Operator 模式）
+weight: 1
 ---
 
 在 Kubernetes 的所有扩展机制中，**CRD + Controller（Operator 模式）** 是使用最广泛的一种。它的核心思想是：通过 CustomResourceDefinition 向集群声明一种新的资源类型，再配合一个自定义控制器，持续监听这个资源的状态，将实际状态驱动向期望状态收敛。
