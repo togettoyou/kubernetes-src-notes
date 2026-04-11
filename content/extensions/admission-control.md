@@ -3,6 +3,10 @@ title: API 层 | 准入控制（Admission Control）
 weight: 3
 ---
 
+CRD + Controller 和 API Aggregation 解决的是"如何向 Kubernetes 引入新的资源类型"，而 **准入控制（Admission Control）** 解决的是另一个问题：如何在请求写入 etcd 之前对它进行拦截、修改或拒绝。
+
+这个能力在实际工程中极为常见。注入 Istio sidecar、强制 Pod 必须带 label、限制 Deployment 副本数上限、阻止使用最新镜像 tag，这些需求背后都是准入控制在工作。相比 CRD 和 API Aggregation，准入控制是一种"横切"能力：它不关心资源类型，只关心所有写请求在落盘前是否满足约束。
+
 参考：[extensible-admission-controllers](https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/extensible-admission-controllers/)、[validating-admission-policy](https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/validating-admission-policy/)、[mutating-admission-policy](https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/mutating-admission-policy/)
 
 ## 准入控制在请求链路中的位置
@@ -24,27 +28,51 @@ rectangle "Schema 校验\n（Object Validation）" as schema #E8F5E9
 rectangle "验证准入\n（Validating Admission）" as validating #FFF3E0
 rectangle "持久化\n（etcd）" as etcd #F3E5F5
 
+rectangle "① 内置变更\n控制器" as builtin_m #FFE0B2
+rectangle "② MutatingAdmission\nPolicy（CEL）" as map #FFE0B2
+rectangle "③ MutatingAdmission\nWebhook" as mwh #FFE0B2
+rectangle "① 内置验证\n控制器" as builtin_v #FFE0B2
+rectangle "② ValidatingAdmission\nPolicy（CEL）" as vap #FFE0B2
+rectangle "③ ValidatingAdmission\nWebhook" as vwh #FFE0B2
+
 authn -right-> authz
 authz -right-> mutating
 mutating -right-> schema
 schema -right-> validating
 validating -right-> etcd
+
+mutating <-down-> builtin_m
+mutating <-down-> map
+mutating <-down-> mwh
+builtin_m -[hidden]right- map
+map -[hidden]right- mwh
+
+validating <-down-> builtin_v
+validating <-down-> vap
+validating <-down-> vwh
+builtin_v -[hidden]right- vap
+vap -[hidden]right- vwh
+
+schema -[hidden]down-> builtin_m
+schema -[hidden]down-> builtin_v
 @enduml
 ```
 
 准入控制位于授权之后、持久化之前，分为两个阶段：
 
-- **变更（Mutating）阶段**：可以修改请求对象，例如注入 sidecar、添加 label、设置默认字段。所有变更操作在这一阶段完成，确保后续校验拿到的是最终形态的对象。
-- **验证（Validating）阶段**：只能读取对象，决定允许或拒绝请求，不能修改。
+- **变更（Mutating）阶段**：可以修改请求对象，例如注入 sidecar、添加 label、设置默认字段。依次执行：内置变更控制器（DefaultStorageClass、LimitRanger 等）→ MutatingAdmissionPolicy → MutatingAdmissionWebhook。
+- **验证（Validating）阶段**：只能读取对象，决定允许或拒绝请求，不能修改。依次执行：内置验证控制器（PodSecurity、NodeRestriction 等）→ ValidatingAdmissionPolicy → ValidatingAdmissionWebhook → ResourceQuota。
 
-每个阶段内部都有两套机制可以选择：
+ResourceQuota 被刻意排在所有 Webhook 之后，原因是它需要看到对象的最终形态才能正确统计资源用量。如果排在 Mutating Webhook 之前，Webhook 注入的 sidecar 所追加的资源请求就不会被算进配额，配额也就失去了意义。
+
+两个阶段内任一插件拒绝请求，整个请求立即终止并返回错误，不会继续往后执行。
+
+扩展准入控制有两套机制，分别对应 Webhook 和 CEL 策略：
 
 | 机制 | 变更阶段 | 验证阶段 | 特点 |
 |------|---------|---------|------|
 | **准入 Webhook** | MutatingAdmissionWebhook | ValidatingAdmissionWebhook | 需要自行部署 HTTP(S) 服务，逻辑完全自定义 |
 | **准入策略 CEL** | MutatingAdmissionPolicy（v1.34 Beta） | ValidatingAdmissionPolicy（v1.30 Stable） | 无需部署服务，用 CEL 表达式声明策略 |
-
-两套机制在同一阶段内并不互斥，会依次执行。
 
 ## 准入 Webhook
 
@@ -65,7 +93,7 @@ participant "Webhook Server\n（你自己部署的服务）" as webhook #FFE0B2
 
 client -> api : 写请求（CREATE / UPDATE / DELETE）
 
-== 变更准入阶段（Mutating） ==
+== MutatingAdmissionWebhook 调用 ==
 api -> webhook : POST /mutating\nAdmissionReview（含原始对象）
 webhook --> api : AdmissionResponse\n（allowed: true，patch: [...]）
 api -> api : 将 patch 应用到对象
@@ -73,7 +101,7 @@ api -> api : 将 patch 应用到对象
 == Schema 校验 ==
 api -> api : 按 CRD / 内置类型校验字段合法性
 
-== 验证准入阶段（Validating） ==
+== ValidatingAdmissionWebhook 调用 ==
 api -> webhook : POST /validating\nAdmissionReview（含变更后的对象）
 webhook --> api : AdmissionResponse\n（allowed: true/false）
 
@@ -85,6 +113,8 @@ else allowed: true
 end
 @enduml
 ```
+
+示例中同一个 Webhook Server 同时实现了 `/mutating` 和 `/validating` 两个端点，实际生产中两者完全可以是独立部署的服务，互不干扰。
 
 kube-apiserver 发送给 Webhook Server 的请求体是一个 `AdmissionReview` 对象，其中 `Request` 字段包含了本次操作的所有信息：资源类型、操作类型（CREATE/UPDATE/DELETE）、操作前后的对象等。Webhook Server 需要解析这个对象，执行自己的逻辑，然后将结果封装回 `AdmissionReview.Response` 中返回。
 
@@ -217,6 +247,7 @@ webhooks:
         resources: [ "pods" ]
     admissionReviewVersions: [ "v1", "v1beta1" ]
     sideEffects: None
+    failurePolicy: Fail    # Webhook 不可用时拒绝请求；Ignore 表示放行
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: simple-webhook  # 只作用于带此 label 的命名空间
@@ -240,6 +271,7 @@ webhooks:
         resources: [ "pods" ]
     admissionReviewVersions: [ "v1", "v1beta1" ]
     sideEffects: None
+    failurePolicy: Fail    # Webhook 不可用时拒绝请求；Ignore 表示放行
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: simple-webhook
@@ -256,7 +288,7 @@ webhooks:
 
 ## 准入策略 CEL
 
-Kubernetes 1.26 引入了一种不需要部署 Webhook Server 的准入控制方案：直接在 API 对象中用 CEL（Common Expression Language）表达式写策略，由 kube-apiserver 内部执行。
+Kubernetes 从 1.26 开始逐步引入一种不需要部署 Webhook Server 的准入控制方案：直接在 API 对象中用 CEL（Common Expression Language）表达式写策略，由 kube-apiserver 内部执行。其中 ValidatingAdmissionPolicy 已在 v1.30 达到 Stable，MutatingAdmissionPolicy 目前是 v1.34 Beta，两者成熟度不同，生产使用时需注意。
 
 CEL 是一种轻量级表达式语言，可以访问对象的任意字段（如 `object.spec.replicas`）、调用内置函数、进行条件判断，非常适合表达"某个字段不能超过某个值"、"某个 label 必须存在"这类结构化规则。
 
@@ -337,7 +369,7 @@ spec:
     - name: does-not-already-have-sidecar
       expression: "!object.spec.initContainers.exists(ic, ic.name == \"mesh-proxy\")"
   failurePolicy: Fail
-  reinvocationPolicy: IfNeeded  # 若其他 Webhook 修改了对象，是否重新执行本策略
+  reinvocationPolicy: IfNeeded  # Policy 先于 Webhook 执行；若后续 Webhook 修改了对象，则重新触发本策略
   mutations:
     - patchType: "ApplyConfiguration"
       applyConfiguration:
@@ -359,7 +391,7 @@ spec:
 
 `matchConditions` 是一个很有用的字段：它在规则匹配之后、`mutations` 执行之前再做一次细粒度过滤。示例中的条件是"Pod 尚未包含名为 mesh-proxy 的 initContainer"，确保策略不会重复注入。
 
-`reinvocationPolicy: IfNeeded` 处理的是多个 Webhook 互相影响的情况：如果某个 Webhook 修改了 Pod 的 initContainers 字段，本策略会被重新触发一次，避免因执行顺序导致注入逻辑被覆盖。
+`reinvocationPolicy: IfNeeded` 处理的是执行顺序带来的覆盖问题。MutatingAdmissionPolicy 在 MutatingAdmissionWebhook 之前执行：策略先跑完注入逻辑，随后某个 Webhook 又修改了 initContainers，导致策略的注入结果被覆盖。`IfNeeded` 的含义是：如果后续的 Webhook 修改了对象，本策略会被重新触发一次，以确保最终状态仍然符合策略预期。
 
 ## 如何选择
 
