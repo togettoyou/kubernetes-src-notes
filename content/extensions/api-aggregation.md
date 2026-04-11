@@ -103,11 +103,11 @@ end
 - `/apis/<group>/<version>/namespaces/{ns}/<resource>/{name}`：get、update、patch、delete
 - `/apis/<group>/<version>/<resource>`：跨命名空间 list
 
-下面我们来实现一个最简单的 AA 服务。它向集群注册一个新的资源类型 `Hello`（Group: `simple.aa.io`，Version: `v1beta1`），并让 `kubectl get hello` 能够正常工作。整个实现分两部分：API Discovery 和 CR CRUD Handle。
-
 ## API Discovery
 
-API Discovery 是整个 AA 服务的核心前提，kube-apiserver 只有知道你的服务提供了哪些资源，才会把对应的请求转发过来。
+下面我们来实现一个最简单的 AA 服务，向集群注册一个新的资源类型 `Hello`（Group: `simple.aa.io`，Version: `v1beta1`），让 `kubectl get hello` 能够正常工作。整个实现分两部分，先从 API Discovery 开始。
+
+kube-apiserver 只有知道你的服务提供了哪些资源，才会把对应的请求转发过来。
 
 ### 旧格式：APIGroupList
 
@@ -410,7 +410,7 @@ I0410 21:30:03.456789   1 main.go:99] GET /namespaces/default/hellos
 
 ## 总结
 
-API Aggregation 是 CRD 的补充而非替代，它把 Kubernetes API 的扩展边界彻底打开，代价是开发者需要自行承担 CRD 替你做好的那部分工作：API Discovery、CRUD 接口、TLS 配置。
+API Aggregation 是 CRD 的补充而非替代，它把 Kubernetes API 的扩展边界彻底打开，代价是开发者需要自行承担 CRD 替你做好的那部分工作：API Discovery 和 CRUD 接口。
 
 核心流程可以归纳为两件事：**实现 HTTP 服务**（API Discovery 端点 + CR CRUD 端点）、**注册 APIService**（AggregatorServer 据此转发请求）。理解了 kube-apiserver 三层委托结构，以及 DiscoveryAggregationController 如何发现并聚合 AA 服务的 API 信息，整个机制就没有任何神秘之处。
 
