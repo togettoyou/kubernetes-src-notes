@@ -3,7 +3,7 @@ title: API 层 | API Aggregation（API 聚合）
 weight: 2
 ---
 
-当 CRD 无法满足需求时，**API Aggregation（API 聚合，AA）** 是另一种扩展 Kubernetes API 的方式。它允许你自行编写并部署一个独立的 HTTP 服务——**Extension API Server（扩展 API 服务器）**，通过 APIService 资源将其注册到 kube-apiserver 的聚合层，之后 kube-apiserver 会将匹配的请求透明地转发过来。
+当 CRD 无法满足需求时，**API Aggregation（API 聚合，AA）** 是另一种扩展 Kubernetes API 的方式。它允许你自行编写并部署一个独立的 HTTP 服务（称为 **Extension API Server，扩展 API 服务器**），通过 APIService 资源将其注册到 kube-apiserver 的聚合层，之后 kube-apiserver 会将匹配的请求透明地转发过来。
 
 参考：[api-extension/apiserver-aggregation](https://kubernetes.io/zh-cn/docs/concepts/extend-kubernetes/api-extension/apiserver-aggregation/)
 
@@ -15,13 +15,19 @@ CRD 的能力覆盖了绝大多数场景，但它有几个先天限制：
 - **不支持长连接子资源**：无法实现 WebSocket、exec、attach、portforward 等需要长时间保持连接的端点（类似 `kubectl exec` 背后的 `/exec` 子资源）
 - **CRUD 语义固定**：CRD 只能走标准的 Create / Read / Update / Delete / List / Watch 接口，无法自定义复杂的请求处理逻辑
 
-AA 把这些限制全部解开——你拿到的是原始 HTTP 请求，可以随意定义响应逻辑。代价是 CRD 帮你自动做好的事情（API Discovery、CRUD 接口、etcd 存储），现在都需要自己实现。
+AA 把这些限制全部解开，你拿到的是原始 HTTP 请求，响应逻辑完全由自己定义。代价是 CRD 帮你自动做好的事情（API Discovery、CRUD 接口、etcd 存储），现在都需要自己实现。
 
 因此，选择的原则很简单：**优先用 CRD，只在 CRD 满足不了时才考虑 AA**。
 
 ## 整体架构
 
-kube-apiserver 内部由三个服务组成，请求按照 AggregatorServer → KubeAPIServer → APIExtensionsServer 的顺序依次委托处理。AA 利用的是第一层 AggregatorServer：
+kube-apiserver 内部由三个服务组成，每个服务各司其职，请求按照 AggregatorServer → KubeAPIServer → APIExtensionsServer 的顺序依次委托处理：
+
+- **AggregatorServer**：第一层，负责 API 聚合。收到请求后先判断是否命中已注册的 APIService，命中则转发给对应的 Extension API Server，否则委托给下一层
+- **KubeAPIServer**：第二层，处理所有 Kubernetes 内置资源（Pod、Service、Deployment 等），未命中则继续委托
+- **APIExtensionsServer**：第三层，处理 CRD 声明的自定义资源，所有请求在这里都找不到处理时返回 404
+
+AA 利用的是第一层 AggregatorServer，Extension API Server 部署在集群中，由 kube-apiserver 以反向代理的方式将请求转发过来：
 
 ```plantuml
 @startuml
@@ -57,7 +63,19 @@ end
 @enduml
 ```
 
-AggregatorServer 内部有一个 `DiscoveryAggregationController`，它持续监听集群中的 APIService 资源变化。每当有新的 APIService 注册，控制器就会主动调用 Extension API Server 的 `/apis` 接口，把返回的 API 信息合并到 kube-apiserver 的全局 Discovery 响应中——这就是为什么创建完 APIService 之后，`kubectl api-resources` 马上就能看到新资源的原因。
+转发时，kube-apiserver 与 Extension API Server 之间走 HTTPS，所以 Extension API Server 必须配置有效的 TLS 证书，并在 APIService 的 `caBundle` 字段中提供对应的 CA 证书供 kube-apiserver 校验。
+
+### DiscoveryAggregationController：注册与发现
+
+光有请求转发还不够，客户端（kubectl）在发出请求之前，需要先通过 API Discovery 知道 `Hello` 这个资源挂在哪个 Group/Version 下，应该请求哪个路径。这部分由 AggregatorServer 内部的 `DiscoveryAggregationController` 负责。
+
+它的工作分两个阶段：
+
+**注册阶段**（创建 APIService 时触发）：`DiscoveryAggregationController` 持续 Watch 集群中的 APIService 资源。一旦发现新的 APIService，就主动调用对应 Extension API Server 的 `/apis` 接口，拉取其提供的 Group/Version/Resource 信息，将其合并到 kube-apiserver 的全局 Discovery 响应中。这就是为什么创建完 APIService 之后，`kubectl api-resources` 马上就能看到新资源。
+
+**运行阶段**（请求到来时）：客户端请求 `/apis` 或 `/apis/<group>/<version>` 时，直接从 kube-apiserver 的全局 Discovery 缓存中读取，不再实时调用 Extension API Server。只有真正命中 APIService 路由的业务请求，才会被实时转发过去。
+
+这个设计保证了 Discovery 信息的聚合对客户端完全透明——客户端始终只和 kube-apiserver 打交道，感知不到背后的 Extension API Server 的存在。
 
 ## 需要自行实现的接口
 
@@ -87,7 +105,7 @@ AggregatorServer 内部有一个 `DiscoveryAggregationController`，它持续监
 
 ## 代码示例：API Discovery
 
-API Discovery 是整个 AA 服务的核心前提——只有 kube-apiserver 知道你的服务提供了哪些资源，它才会把对应的请求转发过来。
+API Discovery 是整个 AA 服务的核心前提，kube-apiserver 只有知道你的服务提供了哪些资源，才会把对应的请求转发过来。
 
 先来看资源定义（`pkg/apis/discovery.go`）：
 
@@ -203,7 +221,7 @@ r.HandleFunc("/apis/simple.aa.io/v1beta1", func(w http.ResponseWriter, r *http.R
 })
 ```
 
-值得注意的是，响应 `APIGroupDiscoveryList` 时，`Content-Type` 里必须带上完整的格式声明（`as=APIGroupDiscoveryList;v=v2beta1;g=apidiscovery.k8s.io`）——kube-apiserver 通过这个字段识别响应体的类型，缺少它会导致解析失败。
+响应 `APIGroupDiscoveryList` 时，`Content-Type` 里必须带上完整的格式声明（`as=APIGroupDiscoveryList;v=v2beta1;g=apidiscovery.k8s.io`）。kube-apiserver 通过这个字段识别响应体的类型，缺少它会导致解析失败。
 
 ## 代码示例：CR CRUD Handle
 
@@ -241,7 +259,7 @@ hellos.HandleFunc("/namespaces/{ns}/hellos", handle).Methods("GET")
 hellos.HandleFunc("/namespaces/{ns}/hellos/{name}", handle).Methods("GET")
 ```
 
-这里的 `handle` 函数处理了一个细节——`kubectl get` 默认以表格形式显示资源，但背后发送的是同一个 GET 请求，区别在于 `Accept` 请求头中是否携带 `as=Table`：
+`kubectl get` 默认以表格形式显示资源，但背后发送的是同一个 GET 请求，区别只在于 `Accept` 请求头中是否携带 `as=Table`。`handle` 函数对这两种情况分别处理：
 
 ```go
 handle := func(w http.ResponseWriter, r *http.Request) {
@@ -294,7 +312,7 @@ panic(http.ListenAndServeTLS(fmt.Sprintf(":%d", port), crt, key, r))
 
 ## 部署：TLS 证书与 APIService
 
-AA 服务必须以 HTTPS 对外服务——kube-apiserver 在转发请求前会验证 Extension API Server 的证书。证书的 CN 和 SAN 必须精确匹配服务的完全限定域名（FQDN），格式固定为 `<svc-name>.<namespace>.svc`。
+AA 服务必须以 HTTPS 对外服务，kube-apiserver 在转发请求前会验证 Extension API Server 的证书。证书的 CN 和 SAN 必须精确匹配服务的完全限定域名（FQDN），格式固定为 `<svc-name>.<namespace>.svc`。
 
 **第一步：生成自签名证书**
 
@@ -468,7 +486,7 @@ I0410 21:30:03.456789   1 main.go:99] GET /namespaces/default/hellos
 
 ## 总结
 
-API Aggregation 是 CRD 的补充而非替代——它把 Kubernetes API 的扩展边界彻底打开，代价是开发者需要自行承担 CRD 替你做好的那部分工作：API Discovery、CRUD 接口、TLS 配置。
+API Aggregation 是 CRD 的补充而非替代，它把 Kubernetes API 的扩展边界彻底打开，代价是开发者需要自行承担 CRD 替你做好的那部分工作：API Discovery、CRUD 接口、TLS 配置。
 
 核心流程可以归纳为三件事：**实现 HTTP 服务**（API Discovery 端点 + CR CRUD 端点）、**配置 TLS**（证书 CN/SAN 必须与 Service FQDN 一致）、**注册 APIService**（AggregatorServer 据此转发请求）。理解了 kube-apiserver 三层委托结构，以及 DiscoveryAggregationController 如何发现并聚合 AA 服务的 API 信息，整个机制就没有任何神秘之处。
 
