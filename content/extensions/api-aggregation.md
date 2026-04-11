@@ -103,7 +103,11 @@ end
 - `/apis/<group>/<version>/namespaces/{ns}/<resource>/{name}`：get、update、patch、delete
 - `/apis/<group>/<version>/<resource>`：跨命名空间 list
 
-## 代码示例：API Discovery
+## 代码示例
+
+下面我们来实现一个最简单的 AA 服务。它向集群注册一个新的资源类型 `Hello`（Group: `simple.aa.io`，Version: `v1beta1`），并让 `kubectl get hello` 能够正常工作。整个实现分两部分：API Discovery 和 CR CRUD Handle。
+
+## API Discovery
 
 API Discovery 是整个 AA 服务的核心前提，kube-apiserver 只有知道你的服务提供了哪些资源，才会把对应的请求转发过来。
 
@@ -212,7 +216,7 @@ r.HandleFunc("/apis/simple.aa.io/v1beta1", func(w http.ResponseWriter, r *http.R
 })
 ```
 
-## 代码示例：CR CRUD Handle
+## CR CRUD Handle
 
 API Discovery 告诉 kube-apiserver "我有哪些资源"，CRUD Handle 才是实际处理资源请求的地方。
 
@@ -327,118 +331,18 @@ panic(http.ListenAndServeTLS(fmt.Sprintf(":%d", port), crt, key, r))
 
 完整代码见：[api-extension/AA/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/api-extension/AA/simple)
 
-## 部署：TLS 证书与 APIService
+## 部署与演示
 
-AA 服务必须以 HTTPS 对外服务，kube-apiserver 在转发请求前会验证 Extension API Server 的证书。证书的 CN 和 SAN 必须精确匹配服务的完全限定域名（FQDN），格式固定为 `<svc-name>.<namespace>.svc`。
-
-### 生成自签名证书
-
-项目提供了 `deploy/init.sh` 脚本完成证书生成和 YAML 填充：
+进入 `deploy` 目录，执行 `init.sh` 生成 TLS 证书并填充 `deploy.yaml`，然后部署：
 
 ```bash
-CN="simple-aa-server.aa-system.svc"
-
-# 生成私钥（tls.key）和证书签名请求（tls.csr）
-openssl req -newkey rsa:2048 -nodes \
-  -keyout certs/tls.key -out certs/tls.csr \
-  -subj "/C=CN/ST=GD/L=SZ/O=Acme, Inc./CN=${CN}"
-
-# 生成自签名 CA 根证书
-openssl req -new -x509 -days 3650 -nodes \
-  -out certs/ca.crt -keyout certs/ca.key \
-  -subj "/C=CN/ST=GD/L=SZ/O=Acme, Inc./CN=Acme Root CA"
-
-# 用 CA 签发 TLS 证书，SAN 必须与服务 FQDN 一致
-openssl x509 -req -days 3650 \
-  -in certs/tls.csr -CA certs/ca.crt -CAkey certs/ca.key -CAcreateserial \
-  -out certs/tls.crt \
-  -extfile <(printf "subjectAltName=DNS:${CN}")
-
-# Base64 编码后填充到 deploy.yaml 的占位符中
-# macOS(BSD sed) 与 Linux(GNU sed) 的 -i 参数语义不同，需要分别处理
-if [[ "$(uname)" == "Darwin" ]]; then
-  sed -i '' "s|<base64-encoded-ca-cert>|$(cat certs/ca.crt | base64 | tr -d '\n')|g" deploy.yaml
-  sed -i '' "s|<base64-encoded-tls-cert>|$(cat certs/tls.crt | base64 | tr -d '\n')|g" deploy.yaml
-  sed -i '' "s|<base64-encoded-tls-key>|$(cat certs/tls.key | base64 | tr -d '\n')|g" deploy.yaml
-else
-  sed -i "s|<base64-encoded-ca-cert>|$(cat certs/ca.crt | base64 | tr -d '\n')|g" deploy.yaml
-  sed -i "s|<base64-encoded-tls-cert>|$(cat certs/tls.crt | base64 | tr -d '\n')|g" deploy.yaml
-  sed -i "s|<base64-encoded-tls-key>|$(cat certs/tls.key | base64 | tr -d '\n')|g" deploy.yaml
-fi
+cd src/api-extension/AA/simple/deploy
+bash init.sh
+kubectl create ns aa-system
+kubectl apply -f deploy.yaml
 ```
 
-脚本生成三个文件：`ca.crt`（CA 根证书）、`tls.crt`（服务证书）、`tls.key`（私钥），并将 Base64 编码后的内容直接填入 `deploy.yaml`。
-
-### 部署资源
-
-`deploy.yaml` 包含四个资源，按部署顺序依次说明。
-
-**Secret**：存储 TLS 证书，挂载给 AA 服务的 Pod 使用：
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: simple-aa-server-cert
-  namespace: aa-system
-type: kubernetes.io/tls
-data:
-  tls.crt: <base64-encoded-tls-cert>
-  tls.key: <base64-encoded-tls-key>
-```
-
-**Deployment**：运行 AA 服务本体，将证书文件挂载到容器内：
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simple-aa-server-deployment
-  namespace: aa-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simple-aa-server
-  template:
-    metadata:
-      labels:
-        app: simple-aa-server
-    spec:
-      containers:
-        - name: simple-aa-server
-          image: togettoyou/simple-aa-server:latest
-          args:
-            - --tls-crt-file=/etc/aa/certs/tls.crt
-            - --tls-key-file=/etc/aa/certs/tls.key
-            - --port=443
-          volumeMounts:
-            - name: cert
-              mountPath: "/etc/aa/certs"
-              readOnly: true
-      volumes:
-        - name: cert
-          secret:
-            secretName: simple-aa-server-cert
-```
-
-**Service**：将 AA 服务暴露在集群内，kube-apiserver 通过此地址转发请求：
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: simple-aa-server
-  namespace: aa-system
-spec:
-  ports:
-    - port: 443
-      targetPort: 443
-  selector:
-    app: simple-aa-server
-```
-
-**APIService**：向 kube-apiserver 注册，完成 AA 服务的接入。这是整个流程的最后一步，创建后 AggregatorServer 会立即调用 AA 服务的 `/apis` 接口拉取 Discovery 信息，并将 `simple.aa.io/v1beta1` 下的所有请求转发到上面的 Service：
+`deploy.yaml` 包含四个资源，前三个是标准的 Secret + Deployment + Service 组合，将 AA 服务运行起来并暴露在集群内。最关键的是最后的 APIService：
 
 ```yaml
 apiVersion: apiregistration.k8s.io/v1
@@ -457,21 +361,9 @@ spec:
   caBundle: <base64-encoded-ca-cert>  # CA 证书，kube-apiserver 用此验证 AA 服务的 TLS 证书
 ```
 
-## 演示
+APIService 的 `name` 固定为 `<version>.<group>` 格式，`spec.group` 和 `spec.version` 声明这个 APIService 覆盖的 GV，`spec.service` 指向 AA 服务的 Service，`caBundle` 是 CA 证书的 Base64 编码，kube-apiserver 用它来验证转发请求时 AA 服务出示的 TLS 证书。
 
-按顺序执行：
-
-```bash
-# 1. 进入 deploy 目录，生成证书并填充 YAML
-cd src/api-extension/AA/simple/deploy
-bash init.sh
-
-# 2. 创建命名空间并部署
-kubectl create ns aa-system
-kubectl apply -f deploy.yaml
-```
-
-确认 APIService 就绪：
+APIService 创建后，可以确认它已就绪：
 
 ```bash
 $ kubectl get apiservice v1beta1.simple.aa.io
@@ -479,19 +371,16 @@ NAME                   SERVICE                        AVAILABLE   AGE
 v1beta1.simple.aa.io   aa-system/simple-aa-server     True        10s
 ```
 
-此时 `Hello` 资源已经可以正常访问：
+`AVAILABLE: True` 表示 AggregatorServer 已成功连通 AA 服务并完成 Discovery 同步。此后 `simple.aa.io/v1beta1` 下的所有请求都会被转发过来：
 
 ```bash
-# kubectl api-resources 可以看到新资源
 $ kubectl api-resources | grep simple
 hellos    hi    simple.aa.io/v1beta1    true    Hello
 
-# kubectl get 以表格形式展示（触发 Table 格式逻辑）
 $ kubectl get hello -A
 NAMESPACE   NAME       MSG
 default     my-hello   hello AA
 
-# kubectl get -o json 返回原始对象
 $ kubectl get hello my-hello -n default -o json
 {
     "apiVersion": "simple.aa.io/v1beta1",
