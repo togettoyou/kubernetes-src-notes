@@ -67,7 +67,7 @@ end
 
 ### DiscoveryAggregationController：注册与发现
 
-光有请求转发还不够，客户端（kubectl）在发出请求之前，需要先通过 API Discovery 知道 `Hello` 这个资源挂在哪个 Group/Version 下，应该请求哪个路径。这部分由 AggregatorServer 内部的 `DiscoveryAggregationController` 负责。
+光有请求转发还不够，客户端（kubectl）在发出请求之前，需要先通过 API Discovery 知道某个资源挂在哪个 Group/Version 下、应该请求哪个路径。这部分由 AggregatorServer 内部的 `DiscoveryAggregationController` 负责。
 
 它的工作分两个阶段：
 
@@ -107,45 +107,43 @@ end
 
 API Discovery 是整个 AA 服务的核心前提，kube-apiserver 只有知道你的服务提供了哪些资源，才会把对应的请求转发过来。
 
-先来看资源定义（`pkg/apis/discovery.go`）：
+### 旧格式：APIGroupList
+
+1.27 之前的 kube-apiserver 通过三次请求完成 Discovery：先请求 `/apis` 获取 `APIGroupList`，再请求 `/apis/<group>` 获取 `APIGroup`，最后请求 `/apis/<group>/<version>` 获取 `APIResourceList`。三个对象需要分别实现（`pkg/apis/discovery.go`）：
 
 ```go
-// APIGroup：声明 AA 服务属于哪个 API 组
+// /apis/<group>：描述 AA 服务的 Group 名称和支持的版本列表
 var _APIGroup = &metav1.APIGroup{
-    TypeMeta: metav1.TypeMeta{
-        Kind:       "APIGroup",
-        APIVersion: "v1",
-    },
-    Name: "simple.aa.io",
+    TypeMeta: metav1.TypeMeta{Kind: "APIGroup", APIVersion: "v1"},
+    Name:     "simple.aa.io",
     Versions: []metav1.GroupVersionForDiscovery{
-        {
-            GroupVersion: "simple.aa.io/v1beta1",
-            Version:      "v1beta1",
-        },
+        {GroupVersion: "simple.aa.io/v1beta1", Version: "v1beta1"},
     },
 }
 
-// APIResourceList：声明该 Group/Version 下有哪些资源
+// /apis/<group>/<version>：描述该版本下有哪些资源
 var _APIResourceList = &metav1.APIResourceList{
-    TypeMeta: metav1.TypeMeta{
-        Kind:       "APIResourceList",
-        APIVersion: "v1",
-    },
+    TypeMeta:     metav1.TypeMeta{Kind: "APIResourceList", APIVersion: "v1"},
     GroupVersion: "simple.aa.io/v1beta1",
     APIResources: []metav1.APIResource{
         {
-            Name:         "hellos",       // 复数形式，用于 URL
-            SingularName: "hello",        // 单数形式
+            Name:         "hellos",        // 复数形式，用于 URL 路径
+            SingularName: "hello",
             Namespaced:   true,
             Kind:         "Hello",
             Verbs:        []string{"create", "delete", "get", "list", "update", "patch"},
-            ShortNames:   []string{"hi"}, // kubectl get hi 同样生效
-            Categories:   []string{"all"},// kubectl get all 时会包含此资源
+            ShortNames:   []string{"hi"},  // kubectl get hi 同样生效
+            Categories:   []string{"all"}, // kubectl get all 时包含此资源
         },
     },
 }
+```
 
-// APIGroupDiscoveryList：Kubernetes 1.27+ 新格式，一次请求返回所有 Discovery 信息
+### 新格式：APIGroupDiscoveryList
+
+1.27+ 引入了聚合格式 `APIGroupDiscoveryList`，把上面三个对象的信息合并在一起，客户端只需一次 `/apis` 请求就能拿到全部 Discovery 信息，减少多次往返：
+
+```go
 var _APIGroupDiscoveryList = &apidiscoveryv2beta1.APIGroupDiscoveryList{
     TypeMeta: metav1.TypeMeta{
         Kind:       "APIGroupDiscoveryList",
@@ -159,15 +157,13 @@ var _APIGroupDiscoveryList = &apidiscoveryv2beta1.APIGroupDiscoveryList{
                     Version: "v1beta1",
                     Resources: []apidiscoveryv2beta1.APIResourceDiscovery{
                         {
-                            Resource:     "hellos",
-                            ResponseKind: &metav1.GroupVersionKind{
-                                Group: "simple.aa.io", Version: "v1beta1", Kind: "Hello",
-                            },
+                            Resource:         "hellos",
+                            ResponseKind:     &metav1.GroupVersionKind{Group: "simple.aa.io", Version: "v1beta1", Kind: "Hello"},
                             Scope:            apidiscoveryv2beta1.ScopeNamespace,
                             SingularResource: "hello",
-                            Verbs:      []string{"create", "delete", "get", "list", "update", "patch"},
-                            ShortNames: []string{"hi"},
-                            Categories: []string{"all"},
+                            Verbs:            []string{"create", "delete", "get", "list", "update", "patch"},
+                            ShortNames:       []string{"hi"},
+                            Categories:       []string{"all"},
                         },
                     },
                 },
@@ -177,40 +173,35 @@ var _APIGroupDiscoveryList = &apidiscoveryv2beta1.APIGroupDiscoveryList{
 }
 ```
 
-这里同时维护了两套格式：旧格式 `APIGroupList`（兼容 1.27 之前的 kube-apiserver）和新格式 `APIGroupDiscoveryList`（1.27+ 默认启用，一次 `/apis` 请求即可返回所有 Group/Version/Resource 信息，减少多次往返）。
+### /apis 端点：兼容新旧两种格式
 
-在 `/apis` 端点的处理逻辑中，通过解析 `Accept` 请求头来决定返回哪种格式（`main.go`）：
+新旧客户端发出的请求路径相同，区别在于 `Accept` 请求头：新版客户端会携带 `as=APIGroupDiscoveryList`，旧版不携带。`/apis` 端点通过解析这个字段决定返回哪种格式（`main.go`）：
 
 ```go
 r.HandleFunc("/apis", func(w http.ResponseWriter, r *http.Request) {
-    // 解析 Accept header，判断客户端支持哪种格式
-    // 新版客户端会携带：Accept: application/json;as=APIGroupDiscoveryList;v=v2beta1;g=apidiscovery.k8s.io
     var as, g string
-    accept := r.Header.Get("Accept")
-    if accept != "" {
-        for _, data := range strings.Split(accept, ";") {
-            if values := strings.Split(data, "="); len(values) == 2 {
-                switch values[0] {
-                case "as":
-                    as = values[1]
-                case "g":
-                    g = values[1]
-                }
+    for _, data := range strings.Split(r.Header.Get("Accept"), ";") {
+        if kv := strings.Split(data, "="); len(kv) == 2 {
+            switch kv[0] {
+            case "as":
+                as = kv[1]
+            case "g":
+                g = kv[1]
             }
         }
     }
     if as == "APIGroupDiscoveryList" && g == "apidiscovery.k8s.io" {
-        // 新版客户端：返回聚合后的 APIGroupDiscoveryList，响应 Content-Type 需同步声明
+        // 响应 Content-Type 必须与请求的 Accept 格式声明保持一致，
+        // kube-apiserver 通过 Content-Type 识别响应体类型，缺少则解析失败
         w.Header().Set("Content-Type", "application/json;as=APIGroupDiscoveryList;v=v2beta1;g=apidiscovery.k8s.io")
         w.Write(apis.APIGroupDiscoveryList())
         return
     }
-    // 旧版客户端：返回 APIGroupList
     w.Header().Set("Content-Type", "application/json")
     w.Write(apis.APIGroupList())
 })
 
-// 兼容旧版客户端：需要分别实现 /apis/<group> 和 /apis/<group>/<version> 端点
+// 旧版客户端在获取 APIGroupList 后，还会继续请求这两个端点
 r.HandleFunc("/apis/simple.aa.io", func(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     w.Write(apis.APIGroup())
@@ -221,22 +212,19 @@ r.HandleFunc("/apis/simple.aa.io/v1beta1", func(w http.ResponseWriter, r *http.R
 })
 ```
 
-响应 `APIGroupDiscoveryList` 时，`Content-Type` 里必须带上完整的格式声明（`as=APIGroupDiscoveryList;v=v2beta1;g=apidiscovery.k8s.io`）。kube-apiserver 通过这个字段识别响应体的类型，缺少它会导致解析失败。
-
 ## 代码示例：CR CRUD Handle
 
 API Discovery 告诉 kube-apiserver "我有哪些资源"，CRUD Handle 才是实际处理资源请求的地方。
 
-先定义 CR 类型（`pkg/apis/hello.go`）：
+### 类型定义
+
+CR 类型的 Go 结构体写法与 CRD 完全一致，内嵌 `TypeMeta` 和 `ObjectMeta`（`pkg/apis/hello.go`）：
 
 ```go
-// Hello 是 AA 服务自定义的资源类型
-// 结构与 CRD 的 Go 类型定义完全一致，内嵌 TypeMeta 和 ObjectMeta
 type Hello struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
-
-    Spec HelloSpec `json:"spec,omitempty"`
+    Spec HelloSpec    `json:"spec,omitempty"`
 }
 
 type HelloSpec struct {
@@ -244,53 +232,70 @@ type HelloSpec struct {
 }
 ```
 
-然后在路由中注册 CRUD 端点（`main.go`）：
+示例中预置了一个硬编码的 `Hello` 对象用于演示，在真实实现中，这里应该替换为从数据库或外部系统查询的实际数据：
+
+```go
+var _TODOHello = &Hello{
+    TypeMeta: metav1.TypeMeta{
+        Kind:       "Hello",
+        APIVersion: "simple.aa.io/v1beta1",
+    },
+    ObjectMeta: metav1.ObjectMeta{
+        Name:      "my-hello",
+        Namespace: "default",
+    },
+    Spec: HelloSpec{Msg: "hello AA"},
+}
+```
+
+### 路由注册
+
+Kubernetes API 的 URL 结构是固定的，AA 服务需要按此规范注册路由（`main.go`）：
 
 ```go
 hellos := r.PathPrefix("/apis/simple.aa.io/v1beta1").Subrouter()
 
-// kubectl get hello -A 时触发：跨命名空间 list
-hellos.HandleFunc("/hellos", handle).Methods("GET")
-
-// kubectl get hello -n <ns> 时触发：按命名空间 list
-hellos.HandleFunc("/namespaces/{ns}/hellos", handle).Methods("GET")
-
-// kubectl get hello <name> -n <ns> 时触发：按名称 get
-hellos.HandleFunc("/namespaces/{ns}/hellos/{name}", handle).Methods("GET")
+hellos.HandleFunc("/hellos", handle).Methods("GET")                         // kubectl get hello -A
+hellos.HandleFunc("/namespaces/{ns}/hellos", handle).Methods("GET")         // kubectl get hello -n <ns>
+hellos.HandleFunc("/namespaces/{ns}/hellos/{name}", handle).Methods("GET")  // kubectl get hello <name> -n <ns>
 ```
 
-`kubectl get` 默认以表格形式显示资源，但背后发送的是同一个 GET 请求，区别只在于 `Accept` 请求头中是否携带 `as=Table`。`handle` 函数对这两种情况分别处理：
+路径中的 `{ns}` 和 `{name}` 是路由变量，可以在 handler 内通过 `mux.Vars(r)` 取出，用于按命名空间或按名称过滤返回结果。示例中为了简化直接返回了固定数据，实际实现时需要根据这两个参数查询对应的资源。
+
+以 `kubectl get hello my-hello -n default` 为例，kube-apiserver 收到请求后经过 API Discovery 确定路径，最终将 `GET /apis/simple.aa.io/v1beta1/namespaces/default/hellos/my-hello` 转发到 AA 服务，匹配上第三条路由，进入 `handle` 处理。
+
+### Table 格式支持
+
+`kubectl get` 默认以表格形式显示资源，背后发的仍是 GET 请求，区别只在于 `Accept` 请求头中携带了 `as=Table`。如果直接返回原始对象，kubectl 只能展示通用的 `NAME` 和 `AGE` 两列，无法显示自定义字段。
+
+`handle` 函数通过检测 `Accept` 请求头决定返回哪种格式：
 
 ```go
 handle := func(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
-
     accept := r.Header.Get("Accept")
     if strings.Contains(accept, "application/json") && strings.Contains(accept, "as=Table") {
-        // kubectl get 默认请求 Table 格式，用于终端表格展示
-        // 需要返回 metav1.Table 对象，声明列名和行数据
+        // kubectl get 默认携带 as=Table，期望返回 metav1.Table 对象
         w.Write(apis.TODOHelloTable())
         return
     }
-    // kubectl get -o json/yaml 等场景，返回原始对象
+    // kubectl get -o json / kubectl get -o yaml 等不携带 as=Table，返回原始对象
     w.Write(apis.TODOHello())
 }
 ```
 
-`Table` 对象的构造如下：
+`metav1.Table` 通过 `ColumnDefinitions` 声明列名，通过 `Rows` 填充每一行的单元格数据：
 
 ```go
 var _TODOHelloTable = &metav1.Table{
-    TypeMeta: metav1.TypeMeta{
-        Kind:       "Table",
-        APIVersion: "meta.k8s.io/v1",
-    },
-    // 声明表格的列名和类型
+    TypeMeta: metav1.TypeMeta{Kind: "Table", APIVersion: "meta.k8s.io/v1"},
+    // 声明终端表格的列名，kubectl 按此渲染表头
     ColumnDefinitions: []metav1.TableColumnDefinition{
         {Name: "Name", Type: "string", Format: "name"},
         {Name: "Msg", Type: "string", Format: "msg"},
     },
-    // 每一行对应一个资源实例
+    // 每个 Row 对应一条资源记录
+    // Cells 按列顺序填充单元格内容，Object 存原始对象（kubectl describe 等命令会用到）
     Rows: []metav1.TableRow{
         {
             Cells:  []interface{}{_TODOHello.Name, _TODOHello.Spec.Msg},
@@ -300,9 +305,21 @@ var _TODOHelloTable = &metav1.Table{
 }
 ```
 
-支持 Table 格式是让 `kubectl get` 能正常显示列信息的前提。如果不处理这个分支，直接返回原始对象，kubectl 只会展示 `NAME` 和 `AGE` 两列，无法显示自定义字段。
+两种请求格式对比，`kubectl get hello -A` 实际发出的请求头中带有：
 
-最后，服务以 HTTPS 启动（kube-apiserver 要求 Extension API Server 必须使用 HTTPS）：
+```
+Accept: application/json;as=Table;v=v1;g=meta.k8s.io,application/json;as=Table;v=v1beta1;g=meta.k8s.io,application/json
+```
+
+而 `kubectl get hello -A -o json` 发出的是：
+
+```
+Accept: application/json
+```
+
+AA 服务通过检测是否包含 `as=Table` 来区分这两种请求，分别返回 `metav1.Table` 和原始的 `Hello` 对象。
+
+最后，服务以 HTTPS 启动：
 
 ```go
 panic(http.ListenAndServeTLS(fmt.Sprintf(":%d", port), crt, key, r))
@@ -314,44 +331,51 @@ panic(http.ListenAndServeTLS(fmt.Sprintf(":%d", port), crt, key, r))
 
 AA 服务必须以 HTTPS 对外服务，kube-apiserver 在转发请求前会验证 Extension API Server 的证书。证书的 CN 和 SAN 必须精确匹配服务的完全限定域名（FQDN），格式固定为 `<svc-name>.<namespace>.svc`。
 
-**第一步：生成自签名证书**
+### 生成自签名证书
 
-项目提供了 `deploy/init.sh` 脚本一键完成证书生成和 YAML 填充：
+项目提供了 `deploy/init.sh` 脚本完成证书生成和 YAML 填充：
 
 ```bash
-#!/bin/bash
 CN="simple-aa-server.aa-system.svc"
 
-# 1. 生成私钥（tls.key）和证书签名请求（tls.csr）
+# 生成私钥（tls.key）和证书签名请求（tls.csr）
 openssl req -newkey rsa:2048 -nodes \
   -keyout certs/tls.key -out certs/tls.csr \
   -subj "/C=CN/ST=GD/L=SZ/O=Acme, Inc./CN=${CN}"
 
-# 2. 生成自签名 CA 根证书
+# 生成自签名 CA 根证书
 openssl req -new -x509 -days 3650 -nodes \
   -out certs/ca.crt -keyout certs/ca.key \
   -subj "/C=CN/ST=GD/L=SZ/O=Acme, Inc./CN=Acme Root CA"
 
-# 3. 用 CA 签发 TLS 证书，SAN 必须与服务 FQDN 一致
+# 用 CA 签发 TLS 证书，SAN 必须与服务 FQDN 一致
 openssl x509 -req -days 3650 \
   -in certs/tls.csr -CA certs/ca.crt -CAkey certs/ca.key -CAcreateserial \
   -out certs/tls.crt \
   -extfile <(printf "subjectAltName=DNS:${CN}")
 
-# 4. Base64 编码后填充到 deploy.yaml 的占位符中
-sed -i "s|<base64-encoded-ca-cert>|$(cat certs/ca.crt | base64 | tr -d '\n')|g" deploy.yaml
-sed -i "s|<base64-encoded-tls-cert>|$(cat certs/tls.crt | base64 | tr -d '\n')|g" deploy.yaml
-sed -i "s|<base64-encoded-tls-key>|$(cat certs/tls.key | base64 | tr -d '\n')|g" deploy.yaml
+# Base64 编码后填充到 deploy.yaml 的占位符中
+# macOS(BSD sed) 与 Linux(GNU sed) 的 -i 参数语义不同，需要分别处理
+if [[ "$(uname)" == "Darwin" ]]; then
+  sed -i '' "s|<base64-encoded-ca-cert>|$(cat certs/ca.crt | base64 | tr -d '\n')|g" deploy.yaml
+  sed -i '' "s|<base64-encoded-tls-cert>|$(cat certs/tls.crt | base64 | tr -d '\n')|g" deploy.yaml
+  sed -i '' "s|<base64-encoded-tls-key>|$(cat certs/tls.key | base64 | tr -d '\n')|g" deploy.yaml
+else
+  sed -i "s|<base64-encoded-ca-cert>|$(cat certs/ca.crt | base64 | tr -d '\n')|g" deploy.yaml
+  sed -i "s|<base64-encoded-tls-cert>|$(cat certs/tls.crt | base64 | tr -d '\n')|g" deploy.yaml
+  sed -i "s|<base64-encoded-tls-key>|$(cat certs/tls.key | base64 | tr -d '\n')|g" deploy.yaml
+fi
 ```
 
-脚本执行完成后，`deploy.yaml` 中的三个占位符会被替换为实际的 Base64 编码证书。
+脚本生成三个文件：`ca.crt`（CA 根证书）、`tls.crt`（服务证书）、`tls.key`（私钥），并将 Base64 编码后的内容直接填入 `deploy.yaml`。
 
-**第二步：部署 AA 服务并注册 APIService**
+### 部署资源
 
-`deploy.yaml` 包含四个资源，按职责依次说明：
+`deploy.yaml` 包含四个资源，按部署顺序依次说明。
+
+**Secret**：存储 TLS 证书，挂载给 AA 服务的 Pod 使用：
 
 ```yaml
-# 1. 将证书存入 Secret，挂载给 AA 服务使用
 apiVersion: v1
 kind: Secret
 metadata:
@@ -361,8 +385,11 @@ type: kubernetes.io/tls
 data:
   tls.crt: <base64-encoded-tls-cert>
   tls.key: <base64-encoded-tls-key>
----
-# 2. 部署 AA 服务本体
+```
+
+**Deployment**：运行 AA 服务本体，将证书文件挂载到容器内：
+
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -393,8 +420,11 @@ spec:
         - name: cert
           secret:
             secretName: simple-aa-server-cert
----
-# 3. 暴露 AA 服务，kube-apiserver 通过此 Service 地址转发请求
+```
+
+**Service**：将 AA 服务暴露在集群内，kube-apiserver 通过此地址转发请求：
+
+```yaml
 apiVersion: v1
 kind: Service
 metadata:
@@ -406,25 +436,26 @@ spec:
       targetPort: 443
   selector:
     app: simple-aa-server
----
-# 4. 向 kube-apiserver 注册 APIService，完成 AA 接入
+```
+
+**APIService**：向 kube-apiserver 注册，完成 AA 服务的接入。这是整个流程的最后一步，创建后 AggregatorServer 会立即调用 AA 服务的 `/apis` 接口拉取 Discovery 信息，并将 `simple.aa.io/v1beta1` 下的所有请求转发到上面的 Service：
+
+```yaml
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
-  name: v1beta1.simple.aa.io   # 命名规则固定为 <version>.<group>
+  name: v1beta1.simple.aa.io  # 命名规则固定为 <version>.<group>
 spec:
   group: simple.aa.io
   version: v1beta1
-  groupPriorityMinimum: 100    # 同 group 多个 APIService 时的排序权重
-  versionPriority: 100         # 同 group 内多个版本的排序权重
+  groupPriorityMinimum: 100   # 同 group 多个 APIService 时的排序权重
+  versionPriority: 100        # 同 group 内多个版本的排序权重
   service:
     namespace: aa-system
     name: simple-aa-server
     port: 443
-  caBundle: <base64-encoded-ca-cert>  # CA 证书，kube-apiserver 用于验证 AA 服务的 TLS 证书
+  caBundle: <base64-encoded-ca-cert>  # CA 证书，kube-apiserver 用此验证 AA 服务的 TLS 证书
 ```
-
-APIService 是整个接入流程的关键。一旦创建，AggregatorServer 就会开始监听它，调用 AA 服务的 `/apis` 接口拉取 Discovery 信息，随后将 `simple.aa.io/v1beta1` 下的所有请求转发到 `simple-aa-server` 这个 Service。
 
 ## 演示
 

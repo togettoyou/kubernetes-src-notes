@@ -22,6 +22,14 @@ tls_cert=$(cat ${certsPath}tls.crt | base64 | tr -d '\n')
 tls_key=$(cat ${certsPath}tls.key | base64 | tr -d '\n')
 
 # 替换 deploy.yaml 文件中的占位符
-sed -i "s|<base64-encoded-ca-cert>|$ca_cert|g" deploy.yaml
-sed -i "s|<base64-encoded-tls-cert>|$tls_cert|g" deploy.yaml
-sed -i "s|<base64-encoded-tls-key>|$tls_key|g" deploy.yaml
+# macOS(BSD sed) 的 -i 需要显式传备份后缀，空字符串表示不生成备份文件
+# Linux(GNU sed) 的 -i 不接受独立的空字符串参数，两者行为不同，需要分别处理
+if [[ "$(uname)" == "Darwin" ]]; then
+  sed -i '' "s|<base64-encoded-ca-cert>|$ca_cert|g" deploy.yaml
+  sed -i '' "s|<base64-encoded-tls-cert>|$tls_cert|g" deploy.yaml
+  sed -i '' "s|<base64-encoded-tls-key>|$tls_key|g" deploy.yaml
+else
+  sed -i "s|<base64-encoded-ca-cert>|$ca_cert|g" deploy.yaml
+  sed -i "s|<base64-encoded-tls-cert>|$tls_cert|g" deploy.yaml
+  sed -i "s|<base64-encoded-tls-key>|$tls_key|g" deploy.yaml
+fi
