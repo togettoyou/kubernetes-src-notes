@@ -135,9 +135,7 @@ agg --> client : 资源数据
 
 ## API Discovery
 
-下面我们来实现一个最简单的 AA 服务，向集群注册一个新的资源类型 `Hello`（Group: `simple.aa.io`，Version: `v1beta1`），让 `kubectl get hello` 能够正常工作。整个实现分两部分，先从 API Discovery 开始。
-
-kube-apiserver 只有知道你的服务提供了哪些资源，才会把对应的请求转发过来。
+下面我们来实现一个最简单的 AA 服务，向集群注册一个新的资源类型 `Hello`（Group: `simple.aa.io`，Version: `v1beta1`），让 `kubectl get hello` 能够正常工作。整个实现分两部分，先从 API Discovery 开始，kube-apiserver 只有知道你的服务提供了哪些资源，才会把对应的请求转发过来。
 
 ### 旧格式：APIGroupList
 
@@ -346,7 +344,7 @@ hellos.HandleFunc("/namespaces/{ns}/hellos", handle).Methods("GET")         // k
 hellos.HandleFunc("/namespaces/{ns}/hellos/{name}", handle).Methods("GET")  // kubectl get hello <name> -n <ns>
 ```
 
-路径中的 `{ns}` 和 `{name}` 是路由变量，可以在 handler 内通过 `mux.Vars(r)` 取出，用于按命名空间或按名称过滤返回结果。示例中为了简化直接返回了固定数据，实际实现时需要根据这两个参数查询对应的资源。
+路径中的 `{ns}` 和 `{name}` 是路由变量，可以在 handler 内通过 `mux.Vars(r)` 取出（`mux` 是 `gorilla/mux`，一个 HTTP 路由库），用于按命名空间或按名称过滤返回结果。示例中为了简化直接返回了固定数据，实际实现时需要根据这两个参数查询对应的资源。
 
 以 `kubectl get hello my-hello -n default` 为例，kube-apiserver 收到请求后经过 API Discovery 确定路径，最终将 `GET /apis/simple.aa.io/v1beta1/namespaces/default/hellos/my-hello` 转发到 AA 服务，匹配上第三条路由，进入 `handle` 处理。
 
@@ -402,8 +400,6 @@ Accept: application/json;as=Table;v=v1;g=meta.k8s.io,application/json;as=Table;v
 ```
 Accept: application/json
 ```
-
-AA 服务通过检测是否包含 `as=Table` 来区分这两种请求，分别返回 `metav1.Table` 和原始的 `Hello` 对象。
 
 最后，服务以 HTTPS 启动：
 
