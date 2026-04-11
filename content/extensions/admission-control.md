@@ -323,6 +323,44 @@ spec:
       reason: Invalid
 ```
 
+Policy 中的 `paramKind` 只声明了参数的类型（`ReplicaLimit`），具体的上限值由 CR 实例提供。`ReplicaLimit` 是一个自定义资源类型，需要先创建对应的 CRD：
+
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: replicalimits.rules.example.com
+spec:
+  group: rules.example.com
+  names:
+    kind: ReplicaLimit
+    plural: replicalimits
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            maxReplicas:
+              type: integer
+```
+
+有了 CRD 之后，再创建具体的参数实例。这里为生产环境创建一个上限为 10 的实例：
+
+```yaml
+apiVersion: rules.example.com/v1
+kind: ReplicaLimit
+metadata:
+  name: "replica-limit-production"
+  namespace: default
+maxReplicas: 10
+```
+
+再通过 Binding 把 Policy 和这个参数对象关联起来，指定作用范围：
+
 ```yaml
 # 绑定策略，同时传入参数
 apiVersion: admissionregistration.k8s.io/v1
