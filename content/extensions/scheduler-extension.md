@@ -255,51 +255,59 @@ skinparam rectangleBorderThickness 1.5
 skinparam arrowColor #555555
 
 rectangle "调度周期（Scheduling Cycle，串行）" as sc #E3F2FD {
+  rectangle "PreEnqueue\nPod 入队前的门控\n如 SchedulingGates" as pe #BBDEFB
   rectangle "QueueSort\n决定 Pod 的入队顺序" as qs #BBDEFB
   rectangle "PreFilter\n检查 Pod 的前置条件\n可向 CycleState 写入数据" as pf #BBDEFB
   rectangle "Filter\n过滤不满足条件的节点\n每个节点独立执行" as f #BBDEFB
   rectangle "PostFilter\nFilter 全部失败时触发\n通常用于抢占逻辑" as pof #BBDEFB
+
   rectangle "PreScore\n为 Score 做预处理\n向 CycleState 写入共享数据" as ps #BBDEFB
   rectangle "Score\n为候选节点打分\nNormalize 归一化到 0-100" as s #BBDEFB
   rectangle "Reserve\n为 Pod 预留资源\n失败则触发 Unreserve 回滚" as r #BBDEFB
   rectangle "Permit\n批准/拒绝/等待\n可用于 Gang Scheduling" as p #BBDEFB
+
+  ' 第一行从左到右（5 个）
+  pe -right-> qs
+  qs -right-> pf
+  pf -right-> f
+  f -right-> pof
+
+  ' 右侧折下，第二行从右到左（4 个）
+  pof -down-> ps
+  ps -left-> s
+  s -left-> r
+  r -left-> p
 }
 
 rectangle "绑定周期（Binding Cycle，并发）" as bc #E8F5E9 {
   rectangle "PreBind\n绑定前的最后校验" as pb #C8E6C9
   rectangle "Bind\n执行实际绑定操作\n写入 Pod.spec.nodeName" as b #C8E6C9
   rectangle "PostBind\n绑定成功后的清理或通知" as pob #C8E6C9
+
+  pb -right-> b
+  b -right-> pob
 }
 
-qs -right-> pf
-pf -right-> f
-f -right-> pof
-pof -right-> ps
-ps -right-> s
-s -right-> r
-r -right-> p
 p -down-> pb
-pb -right-> b
-b -right-> pob
 @enduml
 ```
 
-调度周期是串行的，同一时刻只有一个 Pod 在被调度；绑定周期是并发的，多个 Pod 可以同时执行绑定。`CycleState` 是每次调度周期独立的共享状态，插件可以在 PreFilter 写入数据，在后续的 Filter、Score 中读取，不同调度周期之间的数据互不干扰。
+PreEnqueue 和 QueueSort 作用于队列管理阶段：PreEnqueue 在 Pod 进入调度队列之前触发，返回失败则 Pod 被拦在队列外（内置的 `SchedulingGates` 插件就在这里检查 `pod.spec.schedulingGates`）；QueueSort 决定队列中 Pod 的排队顺序。从 PreFilter 开始进入调度周期，此后调度周期是串行的，同一时刻只有一个 Pod 在被调度。绑定周期是并发的，多个 Pod 可以同时执行绑定。`CycleState` 是每次调度周期独立的共享状态，插件可以在 PreFilter 写入数据，在后续的 Filter、Score 中读取，不同调度周期之间的数据互不干扰。
 
 ### 实现一个调度插件
 
-一个插件只需要实现它感兴趣的扩展点接口，用不到的接口完全不用管。下面是一个同时实现了 PreFilter、Filter、Bind 和 PostBind 的示例（`pkg/simple/simple.go`）：
+一个插件只需要实现它感兴趣的扩展点接口，用不到的接口完全不用管。下面是一个同时实现了 PreFilter、Filter、PreBind、Bind 和 PostBind 的示例（`pkg/simple/simple.go`）：
 
 ```go
 const Name = "SimplePlugin"
 
 type plugin struct {
-    handle framework.Handle  // 框架提供的句柄，可访问 ClientSet、调度器本地缓存等资源
+    handle framework.Handle  // 框架注入的上下文对象，可访问 ClientSet、调度器本地缓存等资源
 }
 
 func (pl *plugin) Name() string { return Name }
 
-// 编译期检查：确保 plugin 实现了这四个扩展点接口
+// 编译期检查：确保 plugin 实现了这五个扩展点接口
 var (
     _ framework.PreFilterPlugin = &plugin{}
     _ framework.FilterPlugin    = &plugin{}
@@ -309,7 +317,7 @@ var (
 )
 ```
 
-`framework.Handle` 是框架注入给插件的依赖，通过它可以调用 `ClientSet()` 操作 Kubernetes API，或通过 `SnapshotSharedLister()` 读取调度器的本地节点缓存。这是 extender 做不到的能力。
+`framework.Handle` 是框架在插件初始化时注入的上下文对象，通过它可以调用 `ClientSet()` 操作 Kubernetes API，或通过 `SnapshotSharedLister()` 读取调度器的本地节点缓存。这是 extender 做不到的能力。
 
 **PreFilter**：在过滤开始前检查 Pod 是否满足插件的前置条件。如果在这里返回失败，整个调度周期直接终止，不会再逐节点执行 Filter：
 
@@ -334,6 +342,16 @@ func (pl *plugin) PreFilterExtensions() framework.PreFilterExtensions { return n
 func (pl *plugin) Filter(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
     // nodeInfo.Node() 直接读调度器本地缓存，不发网络请求
     // 可以根据节点标签、资源剩余、污点等做判断，这里示例直接放行
+    return framework.NewStatus(framework.Success)
+}
+```
+
+**PreBind**：绑定前的最后校验，返回失败会阻止绑定执行：
+
+```go
+// PreBind 在绑定前做最后校验，可以在这里检查节点状态、网络连通性等前置条件
+func (pl *plugin) PreBind(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeName string) *framework.Status {
+    fmt.Printf("[PreBind] Pod %s/%s 准备绑定到节点 %s\n", pod.Namespace, pod.Name, nodeName)
     return framework.NewStatus(framework.Success)
 }
 ```
@@ -479,26 +497,19 @@ func (s *Simple) PreFilter(state api.CycleState, pod proto.Pod) (nodeNames []str
 
 完整代码见：[scheduler-extension/wasm-extension/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/scheduler-extension/wasm-extension/simple)
 
-## 如何选择
-
-| 需求 | 推荐方案 |
-|------|---------|
-| 只需介入 Filter / Prioritize / Bind，不想维护定制调度器 | scheduler extender |
-| 需要介入 QueueSort、Reserve、Permit 等更多阶段 | scheduler framework |
-| 需要在扩展点之间共享状态（CycleState） | scheduler framework |
-| 需要在扩展点内直接访问调度器本地缓存 | scheduler framework |
-| 调度频率高，HTTP 调用延迟不可接受 | scheduler framework |
-| 不想重新编译调度器，且能接受实验性方案 | WASM 插件 |
-
-HAMI 选择 extender 的原因具有代表性：它只需要感知显存，介入 Filter 和 Bind 两个阶段就够了，而 extender 方案让它可以完全复用官方 kube-scheduler 镜像，只需部署一个 HTTP sidecar，运维复杂度更低。
-
 ## 总结
 
 scheduler extender 和 scheduler framework 覆盖了调度扩展的两端：extender 以最小的改动代价介入调度，适合阶段需求简单、不想维护定制调度器的场景；framework 提供全阶段的插件化能力，适合需要深度定制调度逻辑的场景。
 
-两种方式的核心区别可以归结为一个问题：能接受 HTTP 调用的开销和阶段限制吗？如果可以，extender 就够了；如果不行，上 framework。
+| 需求 | 推荐方案 |
+|------|---------|
+| 只需介入 Filter / Prioritize / Bind，不想维护定制调度器 | scheduler extender |
+| 需要介入 PreEnqueue、QueueSort、Reserve、Permit 等更多阶段 | scheduler framework |
+| 需要在扩展点之间共享状态（CycleState） | scheduler framework |
+| 需要在扩展点内直接访问调度器本地缓存 | scheduler framework |
+| 调度频率高，HTTP 调用延迟不可接受 | scheduler framework |
 
-WASM 插件是一个有趣的中间道路，试图在不重新编译调度器的前提下获得接近 framework 的扩展能力，但目前成熟度还不足以在生产中大规模使用。
+两种方式的核心取舍只有一个问题：能接受 HTTP 调用的开销和阶段限制吗？如果可以，extender 就够了；如果不行，上 framework。
 
 ## 微信公众号
 
