@@ -109,7 +109,7 @@ func (s *Server) Filter() http.HandlerFunc {
 
 Prioritize、ProcessPreemption、Bind 的处理框架与 Filter 完全一致，只是入参和出参类型不同。
 
-业务逻辑实现在 `simpleHandler` 中（`pkg/extender/simple.go`）。这个示例实现了两个规则：Filter 阶段过滤掉名字以 `bad` 开头的节点，Prioritize 阶段按节点名字长度打分（名字越短分越高）：
+业务逻辑实现在 `simpleHandler` 中（`pkg/extender/simple.go`）：
 
 ```go
 // Filter 过滤节点，名字带 "bad" 前缀的节点直接排除
@@ -186,7 +186,7 @@ extenders:
     enableHTTPS: false
     httpTimeout: 30s
     weight: 1                           # Prioritize 得分的权重，用于与内置得分加权合并
-    nodeCacheCapable: false             # 是否启用节点缓存（extender 直接从缓存读节点，减少传输量）
+    nodeCacheCapable: false             # extender 自身维护节点缓存，调度器只传节点名而非完整 Node 对象，减少传输量
     managedResources: []                # 只有 Pod 申请了这里列出的资源，才会调用此 extender
 ```
 
@@ -254,9 +254,14 @@ skinparam rectangleBorderColor #888888
 skinparam rectangleBorderThickness 1.5
 skinparam arrowColor #555555
 
+rectangle "队列管理阶段（Queue Management）" as qm #EDE7F6 {
+  rectangle "PreEnqueue\nPod 入队前的门控\n如 SchedulingGates" as pe #D1C4E9
+  rectangle "QueueSort\n决定 Pod 的入队顺序" as qs #D1C4E9
+
+  pe -right-> qs
+}
+
 rectangle "调度周期（Scheduling Cycle，串行）" as sc #E3F2FD {
-  rectangle "PreEnqueue\nPod 入队前的门控\n如 SchedulingGates" as pe #BBDEFB
-  rectangle "QueueSort\n决定 Pod 的入队顺序" as qs #BBDEFB
   rectangle "PreFilter\n检查 Pod 的前置条件\n可向 CycleState 写入数据" as pf #BBDEFB
   rectangle "Filter\n过滤不满足条件的节点\n每个节点独立执行" as f #BBDEFB
   rectangle "PostFilter\nFilter 全部失败时触发\n通常用于抢占逻辑" as pof #BBDEFB
@@ -266,13 +271,11 @@ rectangle "调度周期（Scheduling Cycle，串行）" as sc #E3F2FD {
   rectangle "Reserve\n为 Pod 预留资源\n失败则触发 Unreserve 回滚" as r #BBDEFB
   rectangle "Permit\n批准/拒绝/等待\n可用于 Gang Scheduling" as p #BBDEFB
 
-  ' 第一行从左到右（5 个）
-  pe -right-> qs
-  qs -right-> pf
+  ' 第一行从左到右
   pf -right-> f
   f -right-> pof
 
-  ' 右侧折下，第二行从右到左（4 个）
+  ' 右侧折下，第二行从右到左
   pof -down-> ps
   ps -left-> s
   s -left-> r
@@ -288,6 +291,7 @@ rectangle "绑定周期（Binding Cycle，并发）" as bc #E8F5E9 {
   b -right-> pob
 }
 
+qs -down-> pf
 p -down-> pb
 @enduml
 ```
@@ -365,7 +369,7 @@ func (pl *plugin) Bind(ctx context.Context, state *framework.CycleState, pod *co
         ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID},
         Target:     corev1.ObjectReference{Kind: "Node", Name: nodeName},
     }
-    // 通过 Handle 拿到 ClientSet，调用标准 Bind API
+    // 通过框架注入的上下文对象获取 ClientSet，调用标准 Bind API
     err := pl.handle.ClientSet().CoreV1().Pods(binding.Namespace).Bind(ctx, binding, metav1.CreateOptions{})
     if err != nil {
         return framework.AsStatus(err)
