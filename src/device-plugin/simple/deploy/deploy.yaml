@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: device-plugin-system
+---
+# Device Plugin 以 DaemonSet 部署，自动在每个节点上运行一个实例
+# 必须将 /var/lib/kubelet/device-plugins 目录挂载到容器内，
+# kubelet 通过该目录下的 Unix Socket 与插件通信
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: simple-device-plugin
+  namespace: device-plugin-system
+spec:
+  selector:
+    matchLabels:
+      app: simple-device-plugin
+  template:
+    metadata:
+      labels:
+        app: simple-device-plugin
+    spec:
+      containers:
+        - name: simple-device-plugin
+          image: togettoyou/simple-device-plugin:latest
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            # 挂载 device-plugins 目录，插件通过此目录与 kubelet 交换 Unix Socket
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins

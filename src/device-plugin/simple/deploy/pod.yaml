@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fake-device-demo
+spec:
+  containers:
+    - name: demo
+      image: busybox
+      # 打印分配到的设备 ID，然后保持运行以便观察
+      command: ["sh", "-c", "echo 'Allocated device IDs:' $FAKE_DEVICE_IDS && sleep 3600"]
+      resources:
+        limits:
+          # 申请 1 个 simple.io/fake-device 资源
+          # requests 省略时默认与 limits 相同（扩展资源要求两者相等）
+          simple.io/fake-device: "1"
