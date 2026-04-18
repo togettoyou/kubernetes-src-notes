@@ -9,7 +9,7 @@ Kubernetes 对 CPU、内存等标准资源的调度是内置的，但对 GPU、N
 
 ## 整体架构
 
-Device Plugin 以 DaemonSet 方式部署，在每个节点上各运行一个实例。它与 kubelet 之间通过 Unix Socket 通信，整个生命周期分为注册、上报、分配三个阶段：
+Device Plugin 一般以 DaemonSet 方式部署，在每个节点上各运行一个实例。它与 kubelet 之间通过 Unix Socket 通信，整个生命周期分为注册、上报、分配三个阶段：
 
 ```plantuml
 @startuml
@@ -43,6 +43,12 @@ dp --> k : 返回设备配置\n（环境变量 / 挂载 / 设备节点）
 k -> k : 启动容器，注入设备配置
 @enduml
 ```
+
+三个阶段的职责各不相同：
+
+- **注册阶段**：kubelet 启动时在 `device-plugins/` 目录下创建 `kubelet.sock`，对外提供 Registration gRPC 服务。Device Plugin 启动后先建好自己的 socket，再通过 `kubelet.sock` 调用 `Register()`，告知 kubelet 自己监听的 socket 路径、资源名称和 API 版本。
+- **上报阶段**：注册成功后，kubelet 立即通过插件的 socket 回调 `ListAndWatch()`，插件以 stream 形式推送设备列表。kubelet 根据 `Healthy` 状态的设备数量更新 `Node.status.capacity`，资源随即对调度器可见。
+- **分配阶段**：用户创建 Pod 并声明资源需求，调度器选定节点后，目标节点的 kubelet 调用插件的 `Allocate()`，插件返回设备访问所需的配置（环境变量、挂载、设备节点），kubelet 将其注入容器后启动。
 
 两个关键的 Unix Socket 都位于 `/var/lib/kubelet/device-plugins/` 目录下：`kubelet.sock` 由 kubelet 创建，供 Device Plugin 调用注册接口；插件自己的 socket（如 `simple-device.sock`）由 Device Plugin 创建，kubelet 注册完成后通过它回调 `ListAndWatch` 和 `Allocate`。这也决定了启动顺序：**插件必须先建好自己的 socket、启动 gRPC 服务，再向 kubelet 发起注册**，否则 kubelet 注册成功后立即回调 `ListAndWatch` 时会找不到 socket。
 
@@ -87,14 +93,33 @@ service DevicePlugin {
 
 下面实现一个最简单的 Device Plugin，向 kubelet 注册 5 个虚拟设备（资源名 `simple.io/fake-device`），在 `Allocate` 时通过环境变量将分配到的设备 ID 注入容器。
 
-### 启动与注册
+### 常量与结构体
 
-插件结构体只需持有 gRPC server 实例和一个停止信号 channel（`pkg/plugin/plugin.go`）：
+先定义几个关键常量和插件结构体（`pkg/plugin/plugin.go`）：
 
 ```go
+const (
+    // 资源名称，决定 Node.status.capacity 中的键名
+    // 命名规范：<vendor-domain>/<resource-type>，不能以 kubernetes.io 开头
+    ResourceName = "simple.io/fake-device"
+
+    // 向 kubelet 上报的虚拟设备总数
+    DeviceCount = 5
+
+    // 插件在 device-plugins 目录下创建的 Unix Socket 文件名
+    SocketName = "simple-device.sock"
+
+    // kubelet 与 Device Plugin 通信的 socket 目录
+    SocketDir = "/var/lib/kubelet/device-plugins"
+
+    // kubelet Registration gRPC 服务的 socket 文件名
+    KubeletSocket = "kubelet.sock"
+)
+
+// SimplePlugin 实现了 Device Plugin gRPC 服务
 type SimplePlugin struct {
-    server *grpc.Server
-    stop   chan struct{}
+    server *grpc.Server  // 插件自己的 gRPC 服务器
+    stop   chan struct{}  // 停止信号，关闭时通知 ListAndWatch 退出
 }
 ```
 
@@ -214,7 +239,7 @@ func (p *SimplePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReques
 
 kubelet 重启后会删除并重建 `kubelet.sock`。如果插件不重新注册，kubelet 就不知道这个插件的存在，节点的 `simple.io/fake-device` 资源会消失，直到插件重启。
 
-用 fsnotify 监听整个 `device-plugins/` 目录，等待 `kubelet.sock` 的 `Create` 事件，比轮询更实时：
+用 fsnotify 监听整个 `device-plugins/` 目录，等待 `kubelet.sock` 的 `Create` 事件：
 
 ```go
 func (p *SimplePlugin) watchKubeletRestart() {
@@ -260,13 +285,37 @@ func (p *SimplePlugin) watchKubeletRestart() {
 }
 ```
 
+### main.go
+
+入口只需初始化插件、启动，然后等待终止信号（`main.go`）：
+
+```go
+func main() {
+    klog.Info("Starting simple device plugin")
+
+    p := plugin.NewSimplePlugin()
+
+    if err := p.Start(); err != nil {
+        klog.Fatalf("Failed to start device plugin: %v", err)
+    }
+
+    // SIGTERM 由 DaemonSet 滚动升级时发送，SIGINT 用于本地调试
+    sigCh := make(chan os.Signal, 1)
+    signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+    <-sigCh
+
+    klog.Info("Shutting down simple device plugin")
+    p.Stop()
+}
+```
+
 完整代码见：[device-plugin/simple](https://github.com/togettoyou/kubernetes-src-notes/tree/main/src/device-plugin/simple)
 
 ## 部署与演示
 
 ### 部署 DaemonSet
 
-Device Plugin 必须以 DaemonSet 部署，并将宿主机的 `device-plugins` 目录挂载到容器内，才能创建和访问 Unix Socket：
+我们以 DaemonSet 部署，并将宿主机的 `device-plugins` 目录挂载到容器内，用于创建和访问 Unix Socket：
 
 ```yaml
 apiVersion: apps/v1
@@ -367,7 +416,7 @@ I0418 13:38:02.678938  1 plugin.go:218] Allocate: container requested devices [f
 
 Device Plugin 用统一的 gRPC 接口把硬件设备的注册、上报、分配三个环节标准化，让调度器和 kubelet 无需感知底层硬件的具体类型。实现一个插件需要做三件事：在 `device-plugins/` 目录下建 socket 并启动 gRPC 服务、向 kubelet 注册资源名和 socket 路径、在 `ListAndWatch` 持续上报设备状态并在 `Allocate` 返回容器访问设备所需的配置。
 
-Device Plugin 有一个根本局限：`ListAndWatch` 接口只能上报设备数量（整数），调度器完全无法感知设备的具体属性，例如显存大小、型号、NUMA 拓扑。HAMI 的解决方案是绕道 Node Annotation 传递这些信息，再配合 Scheduler Extender 做感知调度，本质上是在 Device Plugin 的数量模型外再架一层。Kubernetes 1.34 GA 的 **DRA（Dynamic Resource Allocation）** 从 API 层面解决了这个问题：设备驱动通过 `ResourceSlice` 上报携带完整属性的设备列表，调度器可以直接读取并用 CEL 表达式做细粒度筛选，原生支持多 Pod 共享同一设备，使用体验类似 PersistentVolumeClaim。
+Device Plugin 有一个根本局限：`ListAndWatch` 接口只能上报设备数量（整数），调度器完全无法感知设备的具体属性，例如显存大小、型号、NUMA 拓扑。Kubernetes 1.34 GA 的 **DRA（Dynamic Resource Allocation）** 从 API 层面解决了这个问题：设备驱动通过 `ResourceSlice` 上报携带完整属性的设备列表，调度器可以直接读取并用 CEL 表达式做细粒度筛选，原生支持多 Pod 共享同一设备，使用体验类似 PersistentVolumeClaim。
 
 ## 微信公众号
 
