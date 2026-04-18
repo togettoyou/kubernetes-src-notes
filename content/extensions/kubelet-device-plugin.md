@@ -19,7 +19,7 @@ skinparam responseMessageBelowArrow true
 skinparam defaultTextAlignment center
 
 participant "kubelet" as k #BBDEFB
-participant "Device Plugin\n（DaemonSet Pod）" as dp #FFE0B2
+participant "Device Plugin" as dp #FFE0B2
 participant "kube-apiserver" as api #E3F2FD
 participant "kube-scheduler" as sch #E8F5E9
 actor "用户" as user
@@ -58,7 +58,7 @@ Device Plugin 需要实现以下 gRPC 服务：
 
 ```protobuf
 service DevicePlugin {
-    // 声明插件支持哪些可选能力，kubelet 启动时调用一次
+    // 声明插件支持哪些可选能力，插件注册成功后 kubelet 调用一次
     rpc GetDevicePluginOptions(Empty) returns (DevicePluginOptions) {}
 
     // 以流的形式持续上报设备列表，设备状态变化时推送新列表
@@ -79,15 +79,15 @@ service DevicePlugin {
 
 `GetDevicePluginOptions` 的返回值告诉 kubelet 后两个可选接口是否实现了，kubelet 据此决定是否调用它们。不需要实现可选接口时，把对应字段设为 `false` 即可，kubelet 不会调用。
 
-`ListAndWatch` 的返回值是一个持续开放的 stream，设备状态发生变化时，插件主动向 stream 推送新列表。kubelet 根据 `Health` 字段为 `Healthy` 的设备数量更新 `Node.status.allocatable` 中的资源数量；设备变为 `Unhealthy` 时可分配数量减少，但已分配给现有 Pod 的设备不会被强制收回。
+`ListAndWatch` 的返回值是一个持续开放的 stream，设备状态发生变化时，插件主动向 stream 推送新列表。kubelet 根据 `Health` 字段为 `Healthy` 的设备数量更新 `Node.status.capacity`（以及由此派生的 `allocatable`）；设备变为 `Unhealthy` 时可分配数量减少，但已分配给现有 Pod 的设备不会被强制收回。
 
 `Allocate` 的返回值 `ContainerAllocateResponse` 有三种方式向容器暴露设备：
 
 | 字段 | 类型 | 用途 |
 |------|------|------|
 | `Envs` | `map[string]string` | 注入环境变量，适合传递设备 ID、配置参数 |
-| `Mounts` | `[]Mount` | 挂载宿主机路径，适合传递驱动库（如 `libvgpu.so`） |
-| `Devices` | `[]DeviceSpec` | 暴露设备节点，适合真实硬件（如 `/dev/nvidia0`） |
+| `Mounts` | `[]*Mount` | 挂载宿主机路径，适合传递驱动库（如 `libvgpu.so`） |
+| `Devices` | `[]*DeviceSpec` | 暴露设备节点，适合真实硬件（如 `/dev/nvidia0`） |
 
 ## 实现设备插件
 
@@ -122,6 +122,8 @@ type SimplePlugin struct {
     stop   chan struct{}  // 停止信号，关闭时通知 ListAndWatch 退出
 }
 ```
+
+### 启动与注册
 
 `Start()` 按顺序完成三件事：清理旧 socket、启动 gRPC 服务、向 kubelet 注册：
 
@@ -179,7 +181,11 @@ func (p *SimplePlugin) register() error {
         ResourceName: ResourceName,    // "simple.io/fake-device"
         Options:      &pluginapi.DevicePluginOptions{},
     })
-    return err
+    if err != nil {
+        return fmt.Errorf("registration call failed: %v", err)
+    }
+    klog.Infof("Successfully registered with kubelet: resource=%s, devices=%d", ResourceName, DeviceCount)
+    return nil
 }
 ```
 
@@ -213,7 +219,7 @@ func (p *SimplePlugin) ListAndWatch(_ *pluginapi.Empty, stream pluginapi.DeviceP
 
 ### Allocate：分配设备
 
-Pod 调度到节点后，kubelet 在创建容器前调用 `Allocate`，传入本次分配的设备 ID 列表（一个 `ContainerRequests` 对应一个容器）。示例通过环境变量将设备 ID 注入容器，真实场景通常还会通过 `Mounts` 挂载驱动库或通过 `Devices` 暴露设备节点：
+Pod 调度到节点后，kubelet 在创建容器前调用 `Allocate`，传入本次分配的设备 ID 列表（`ContainerRequests` 包含本次请求中所有容器的分配项，每个元素对应一个容器）。示例通过环境变量将设备 ID 注入容器，真实场景通常还会通过 `Mounts` 挂载驱动库或通过 `Devices` 暴露设备节点：
 
 ```go
 func (p *SimplePlugin) Allocate(_ context.Context, req *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error) {
@@ -237,7 +243,7 @@ func (p *SimplePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReques
 
 ### watchKubeletRestart：监听 kubelet 重启
 
-kubelet 重启后会删除并重建 `kubelet.sock`。如果插件不重新注册，kubelet 就不知道这个插件的存在，节点的 `simple.io/fake-device` 资源会消失，直到插件重启。
+kubelet 重启后会删除并重建 `kubelet.sock`。如果插件不重新注册，节点的 `simple.io/fake-device` 资源会从 capacity 中消失；`watchKubeletRestart` 正是为了检测这一情况，在 kubelet 重建 socket 后主动触发重新注册。
 
 用 fsnotify 监听整个 `device-plugins/` 目录，等待 `kubelet.sock` 的 `Create` 事件：
 
