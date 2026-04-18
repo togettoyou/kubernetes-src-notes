@@ -362,7 +362,7 @@ I0418 13:36:27.615464  1 plugin.go:187] ListAndWatch called by kubelet
 I0418 13:36:27.616076  1 plugin.go:200] Reported 5 devices to kubelet
 ```
 
-注册完成后，`simple.io/fake-device: 5` 出现在节点的 `capacity` 和 `allocatable` 中：
+注册完成后，`simple.io/fake-device: 5` 出现在节点的 `capacity` 和 `allocatable` 中。两者含义不同：`capacity` 是节点上该资源的总量，由 Device Plugin 通过 `ListAndWatch` 上报；`allocatable` 是可供 Pod 申请的量，等于 `capacity` 减去系统预留（对设备插件资源通常无预留，所以两者相等）。调度器依据 `allocatable` 做调度决策：
 
 ```bash
 $ kubectl get node node01 -o jsonpath='{.status.capacity}' | python3 -m json.tool
