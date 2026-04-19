@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dra-system
+---
+# RBAC：驱动需要读写 ResourceSlice（集群级资源），以及读取 Node 信息
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: simple-dra-driver
+rules:
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: simple-dra-driver
+  namespace: dra-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: simple-dra-driver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: simple-dra-driver
+subjects:
+  - kind: ServiceAccount
+    name: simple-dra-driver
+    namespace: dra-system
+---
+# DRA 驱动以 DaemonSet 部署，每个节点运行一个实例
+# 必须挂载以下宿主机目录：
+#   /var/lib/kubelet/plugins        驱动在此创建 dra.sock
+#   /var/lib/kubelet/plugins_registry  驱动在此创建注册 socket，kubelet 监听此目录
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: simple-dra-driver
+  namespace: dra-system
+spec:
+  selector:
+    matchLabels:
+      app: simple-dra-driver
+  template:
+    metadata:
+      labels:
+        app: simple-dra-driver
+    spec:
+      serviceAccountName: simple-dra-driver
+      containers:
+        - name: simple-dra-driver
+          image: togettoyou/simple-dra-driver:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # NODE_NAME 注入当前节点名，Controller 用此值命名 ResourceSlice 和 ResourcePool
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: plugins-dir
+              mountPath: /var/lib/kubelet/plugins
+            - name: registry-dir
+              mountPath: /var/lib/kubelet/plugins_registry
+      volumes:
+        - name: plugins-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins
+        - name: registry-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry

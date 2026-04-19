@@ -1,0 +1,10 @@
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: fake-device
+spec:
+  # selectors 是集群管理员预设的设备筛选条件
+  # 用户创建 ResourceClaim 时引用此 DeviceClass，自动继承这些条件
+  selectors:
+    - cel:
+        expression: device.driver == "fake.dra.example.com"

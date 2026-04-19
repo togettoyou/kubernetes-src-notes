@@ -1,0 +1,38 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: my-fake-device
+  namespace: default
+spec:
+  devices:
+    requests:
+      - name: my-request
+        deviceClassName: fake-device
+        # 可选：在 DeviceClass 筛选的基础上，进一步用 CEL 表达式精确选择设备
+        # selectors:
+        #   - cel:
+        #       expression: device.attributes["fake.dra.example.com"].index == 0
+---
+# 申请设备的 Pod 示例
+# Pod 通过 spec.resourceClaims 引用 ResourceClaim，
+# 容器通过 resources.claims 声明自己要使用哪个 claim
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fake-device-consumer
+  namespace: default
+spec:
+  # resourceClaims 声明此 Pod 要使用的 ResourceClaim
+  # name 是在本 Pod 内的引用名，source.resourceClaimName 指向上面创建的 ResourceClaim
+  resourceClaims:
+    - name: my-device
+      resourceClaimName: my-fake-device
+  containers:
+    - name: consumer
+      image: busybox
+      command: ["sh", "-c", "env | grep CDI; sleep 3600"]
+      resources:
+        # claims 声明容器使用 Pod 级别 resourceClaims 中的哪一项
+        claims:
+          - name: my-device
+            request: my-request
