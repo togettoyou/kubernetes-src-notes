@@ -96,7 +96,7 @@ spec:
           #       expression: device.capacity["fake.dra.example.com"].memory.compareTo(quantity("16Gi")) >= 0
 ```
 
-调度器找到满足条件的设备后，将分配结果写入 `status.allocation`，ResourceClaim 进入 `allocated` 状态。Pod 绑定节点后变为 `allocated,reserved`，设备被独占。ResourceClaim 可以被多个 Pod 共享（`status.reservedFor` 列出所有持有者），也可以在 Pod 删除后重新分配给新 Pod。
+调度器在 PreBind 阶段同时写入 `status.allocation` 和 `status.reservedFor`，ResourceClaim 直接进入 `allocated,reserved` 状态，设备被独占。ResourceClaim 可以被多个 Pod 共享，`status.reservedFor` 列出所有当前持有者。
 
 ### ResourceClaimTemplate
 
@@ -143,7 +143,7 @@ DRA 涉及五个角色：
 
 - **DRA 驱动**：以 DaemonSet 部署到每个节点，分为两个逻辑组件。**Controller** 负责向 API Server 发布本节点的 ResourceSlice；**kubelet Plugin** 通过 gRPC 接收 kubelet 的调用，执行设备的实际初始化和释放。两者通常运行在同一进程内。
 - **kube-apiserver**：存储 ResourceSlice、ResourceClaim、DeviceClass 等 DRA 对象，是各组件唯一的通信枢纽。
-- **kube-scheduler**：从 API Server 读取 ResourceSlice，对设备属性跑 CEL 表达式完成匹配，将分配结果写回 ResourceClaim 的 `status.allocation`，并为 Pod 绑定节点。整个过程纯粹在控制面完成，无需和节点通信。
+- **kube-scheduler**：从 API Server 读取 ResourceSlice，对设备属性跑 CEL 表达式完成匹配，将 `status.allocation` 和 `status.reservedFor` 写回 ResourceClaim，并为 Pod 绑定节点。整个过程纯粹在控制面完成，无需和节点通信。
 - **kubelet**：检测到 Pod 调度到本节点后，通过 DRA gRPC 接口依次调用驱动的 `NodePrepareResources`（设备初始化）和 `NodeUnprepareResources`（设备释放）。同时负责发现并注册 DRA 驱动（plugin manager 机制）。
 - **containerd**：从 kubelet 接收 CDI 设备 ID，读取 `/etc/cdi/` 下的描述文件，将设备注入容器（设置环境变量、挂载路径、设备节点等）。
 
@@ -174,7 +174,7 @@ k -> drv : NotifyRegistrationStatus(registered=true)
 == 调度阶段 ==
 user -> api : 创建 DeviceClass + ResourceClaim
 user -> api : 创建 Pod（spec.resourceClaims 引用 ResourceClaim）
-sch -> api : 读取 ResourceSlice，CEL 匹配设备（PreFilter/Filter/Reserve）
+sch -> api : 读取 ResourceSlice，CEL 匹配设备（PreFilter/Filter）
 sch -> api : 写入 status.allocation + reservedFor（PreBind）
 note right of sch : ResourceClaim 状态变为 allocated,reserved
 sch -> api : 绑定 Pod 到节点（写入 spec.nodeName）
@@ -266,7 +266,7 @@ func (c *Controller) PublishResourceSlice(ctx context.Context) error {
 }
 ```
 
-`ResourceSlice` 是集群级资源，驱动的 ServiceAccount 需要 `resource.k8s.io/resourceslices` 的 `create/update/delete` 权限（见 `deploy/driver.yaml` 中的 ClusterRole）。
+`ResourceSlice` 是集群级资源，驱动的 ServiceAccount 需要 `resource.k8s.io/resourceslices` 的 `get/list/watch/create/update/delete` 权限（见 `deploy/driver.yaml` 中的 ClusterRole）。
 
 ### kubelet Plugin：注册握手
 
@@ -508,7 +508,7 @@ spec:
             request: my-request
 ```
 
-Pod 创建后，调度器读取 ResourceSlice，找到满足 DeviceClass CEL 条件的设备，将分配结果写入 ResourceClaim 的 `status.allocation`，随后选定节点。kubelet 检测到 Pod 调度到本节点，调用驱动的 `NodePrepareResources`，驱动返回 CDI 设备 ID，containerd 完成设备注入，容器启动。
+Pod 创建后，调度器读取 ResourceSlice，找到满足 DeviceClass CEL 条件的设备并选定节点，在 PreBind 阶段将分配结果写入 ResourceClaim 的 `status.allocation` 和 `status.reservedFor`，随后将 `spec.nodeName` 写入 Pod 完成绑定。kubelet 检测到 Pod 调度到本节点，调用驱动的 `NodePrepareResources`，驱动返回 CDI 设备 ID，containerd 完成设备注入，容器启动。
 
 ResourceClaim 被分配并绑定到 Pod 后，状态变为 `allocated,reserved`：
 
