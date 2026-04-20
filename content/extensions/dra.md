@@ -175,8 +175,8 @@ k -> drv : NotifyRegistrationStatus(registered=true)
 user -> api : 创建 DeviceClass + ResourceClaim
 user -> api : 创建 Pod（spec.resourceClaims 引用 ResourceClaim）
 sch -> api : 读取 ResourceSlice，CEL 匹配设备
-note right of sch : ResourceClaim 状态变为 allocated
 sch -> api : 写入 ResourceClaim.status.allocation（分配结果）
+note right of sch : ResourceClaim 状态变为 allocated
 sch -> api : 绑定 Pod 到节点（写入 spec.nodeName）
 
 == 节点准备阶段 ==
@@ -193,7 +193,7 @@ k -> cri : StopContainer / RemovePodSandbox
 k -> drv : NodeUnprepareResources(claims)
 drv -> drv : 释放设备资源
 drv --> k : 成功（Claims map 中每个 claim 均有对应条目）
-k -> api : 清除 ResourceClaim.status.reservedFor
+note right of k : resource claim controller 检测到 Pod 已删除\n清除 ResourceClaim.status.reservedFor
 @enduml
 ```
 
@@ -202,7 +202,7 @@ k -> api : 清除 ResourceClaim.status.reservedFor
 - **驱动启动**：Controller 先通过 API Server 发布 ResourceSlice，让调度器立即看到设备。Plugin 随后在 `plugins_registry/` 创建注册 socket，kubelet 的 plugin manager 检测到后主动调用 `GetInfo` 完成握手，握手成功后 kubelet 才会向该驱动发起 `NodePrepareResources`。
 - **调度阶段**：调度器在扩展点 `PreFilter`/`Filter`/`Reserve` 中处理 ResourceClaim。它遍历 ResourceSlice 中的每个设备，对 DeviceClass 的 selector 以及 ResourceClaim 中 `exactly.selectors` 的 CEL 表达式逐一求值，找到满足条件的节点和设备组合后，将分配结果写入 `status.allocation`，ResourceClaim 进入 `allocated` 状态。
 - **节点准备阶段**：kubelet 调用 `NodePrepareResources` 时传入已分配给该 Pod 的所有 ResourceClaim（含 namespace、name、uid），驱动执行设备初始化操作并返回 CDI 设备 ID。kubelet 将 CDI ID 传给 containerd，containerd 读取 `/etc/cdi/` 下对应的 JSON 描述文件，完成环境变量注入、设备节点挂载等操作。CDI 之于设备注入，类似 CNI 之于网络，是驱动与容器运行时之间的标准化协议。
-- **Pod 删除**：kubelet 停止容器后调用 `NodeUnprepareResources` 释放设备。驱动必须在响应的 `Claims` map 中为每个传入的 claim 写入对应条目，否则 kubelet 认为释放未成功并持续重试。设备释放后，调度器清除 ResourceClaim 的 `status.reservedFor`，该 claim 可以被重新调度分配。
+- **Pod 删除**：kubelet 停止容器后调用 `NodeUnprepareResources` 释放设备。驱动必须在响应的 `Claims` map 中为每个传入的 claim 写入对应条目，否则 kubelet 认为释放未成功并持续重试。设备释放后，kube-controller-manager 的 resource claim controller 检测到 Pod 已删除，将其从 ResourceClaim 的 `status.reservedFor` 中移除，该 claim 可以被重新调度分配。
 
 ## 实现 DRA 驱动
 
