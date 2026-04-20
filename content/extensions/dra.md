@@ -41,7 +41,7 @@ spec:
 
 **DeviceClass** 是集群管理员定义的设备类型模板，类似 StorageClass。用户创建 ResourceClaim 时引用 DeviceClass，自动继承其中预设的 CEL 选择器；管理员可以在 DeviceClass 中限定只有特定驱动的设备才能被申请。
 
-**ResourceClaim** 是用户声明资源需求的对象，类似 PersistentVolumeClaim。用户在 `spec.devices.requests` 中写明需要几个设备、引用哪个 DeviceClass，以及额外的 CEL 筛选条件。调度器在找到满足条件的设备后，将分配结果写入 `status.allocation`。
+**ResourceClaim** 是用户声明资源需求的对象，类似 PersistentVolumeClaim。用户在 `spec.devices.requests` 中写明需要几个设备；每个 request 通过 `exactly.deviceClassName` 引用 DeviceClass，并可在 `exactly.selectors` 中追加 CEL 筛选条件。调度器在找到满足条件的设备后，将分配结果写入 `status.allocation`。
 
 **ResourceClaimTemplate** 用于"每个 Pod 独享一个 ResourceClaim"的场景。在 Pod 的 `resourceClaims` 字段中引用 Template 时，Kubernetes 会为每个 Pod 自动创建一个独立的 ResourceClaim，并在 Pod 删除时回收。
 
@@ -372,7 +372,9 @@ spec:
   devices:
     requests:
       - name: my-request
-        deviceClassName: fake-device
+        # resource/v1 中 deviceClassName 移到了 exactly 子对象内
+        exactly:
+          deviceClassName: fake-device
 ```
 
 ### Pod 申请设备

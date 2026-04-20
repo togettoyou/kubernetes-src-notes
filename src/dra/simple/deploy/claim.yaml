@@ -7,11 +7,13 @@ spec:
   devices:
     requests:
       - name: my-request
-        deviceClassName: fake-device
-        # 可选：在 DeviceClass 筛选的基础上，进一步用 CEL 表达式精确选择设备
-        # selectors:
-        #   - cel:
-        #       expression: device.attributes["fake.dra.example.com"].index == 0
+        # resource/v1 中 deviceClassName 移到了 exactly 子对象内
+        exactly:
+          deviceClassName: fake-device
+          # 可选：在 DeviceClass 筛选的基础上，进一步用 CEL 表达式精确选择设备
+          # selectors:
+          #   - cel:
+          #       expression: device.attributes["fake.dra.example.com"].index == 0
 ---
 # 申请设备的 Pod 示例
 # Pod 通过 spec.resourceClaims 引用 ResourceClaim，
