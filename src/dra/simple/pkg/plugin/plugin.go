@@ -200,9 +200,16 @@ func (p *DRAPlugin) NodePrepareResources(ctx context.Context, req *drapb.NodePre
 // NodeUnprepareResources 在 Pod 删除后由 kubelet 调用
 // 驱动负责释放此前为这些 ResourceClaim 准备的设备资源
 func (p *DRAPlugin) NodeUnprepareResources(ctx context.Context, req *drapb.NodeUnprepareResourcesRequest) (*drapb.NodeUnprepareResourcesResponse, error) {
+	resp := &drapb.NodeUnprepareResourcesResponse{
+		Claims: make(map[string]*drapb.NodeUnprepareResourceResponse),
+	}
+
 	for _, claim := range req.Claims {
 		klog.Infof("NodeUnprepareResources: claim=%s/%s uid=%s", claim.Namespace, claim.Name, claim.UID)
 		// 真实场景：在这里释放设备资源（如删除软链接、归还显存分区等）
+		// 每个 claim 必须在 Claims map 中有对应条目，否则 kubelet 认为释放未成功，会持续重试
+		resp.Claims[claim.UID] = &drapb.NodeUnprepareResourceResponse{}
 	}
-	return &drapb.NodeUnprepareResourcesResponse{}, nil
+
+	return resp, nil
 }
