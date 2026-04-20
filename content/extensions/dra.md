@@ -19,15 +19,23 @@ DRA 针对性地解决了这三个问题：设备属性写进 `ResourceSlice`，
 
 ## 核心 API
 
-DRA 围绕四个 API 资源构建。
+DRA 围绕四个 API 资源构建：ResourceSlice、DeviceClass、ResourceClaim、ResourceClaimTemplate。
 
-**ResourceSlice** 是驱动发布到 API Server 的设备目录，集群级资源。每个 ResourceSlice 描述一个驱动在某个资源池（通常等于节点）内的一批设备，每个设备可以携带任意属性（`attributes`）和容量（`capacity`），调度器用 CEL 对这些属性做匹配：
+### ResourceSlice
+
+ResourceSlice 是驱动发布到 API Server 的设备目录，集群级资源。每个 ResourceSlice 属于一个驱动（`spec.driver`）和一个资源池（`spec.pool`）。资源池通常对应一个节点，池名与节点名相同；驱动也可以将多个节点的设备聚合为一个共享池（如网络附加设备）。一个资源池可以拆分为多个 ResourceSlice 对象，`spec.pool.resourceSliceCount` 记录总片数，调度器收齐全部片才认为该池的设备信息完整。
+
+每个设备（`spec.devices[]`）可以携带任意属性（`attributes`）和容量（`capacity`）：
+
+- `attributes`：键值对，值类型支持 string、int、bool、version。调度器用 CEL 对这些属性做匹配，例如 `device.attributes["fake.dra.example.com"].model == "A100"`。键名不带域名前缀时默认归属驱动的域名。
+- `capacity`：键值对，值为 `resource.Quantity`，表示该设备可提供的可量化资源，例如显存大小。
 
 ```yaml
 spec:
   driver: fake.dra.example.com
   pool:
     name: node01
+    generation: 1
     resourceSliceCount: 1
   nodeName: node01
   devices:
@@ -37,28 +45,109 @@ spec:
         index: {int: 0}
       capacity:
         memory: {value: 8Gi}
+    - name: fake-1
+      attributes:
+        model: {string: "fake-v1"}
+        index: {int: 1}
+      capacity:
+        memory: {value: 8Gi}
 ```
 
-**DeviceClass** 是集群管理员定义的设备类型模板，类似 StorageClass。用户创建 ResourceClaim 时引用 DeviceClass，自动继承其中预设的 CEL 选择器；管理员可以在 DeviceClass 中限定只有特定驱动的设备才能被申请。
+### DeviceClass
 
-**ResourceClaim** 是用户声明资源需求的对象，类似 PersistentVolumeClaim。用户在 `spec.devices.requests` 中写明需要几个设备；每个 request 通过 `exactly.deviceClassName` 引用 DeviceClass，并可在 `exactly.selectors` 中追加 CEL 筛选条件。调度器在找到满足条件的设备后，将分配结果写入 `status.allocation`。
+DeviceClass 是集群管理员定义的设备类型模板，集群级资源，类似 StorageClass。它的核心作用是预设一组 CEL 选择器，将"这类设备来自哪个驱动、满足什么基本条件"固化为一个可重用的名字，用户只需在 ResourceClaim 中引用名字，无需重复写驱动名或基础约束。
 
-**ResourceClaimTemplate** 用于"每个 Pod 独享一个 ResourceClaim"的场景。在 Pod 的 `resourceClaims` 字段中引用 Template 时，Kubernetes 会为每个 Pod 自动创建一个独立的 ResourceClaim，并在 Pod 删除时回收。
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: fake-device
+spec:
+  selectors:
+    - cel:
+        expression: device.driver == "fake.dra.example.com"
+```
 
-与 Device Plugin 的对比：
+调度器在匹配设备时，DeviceClass 的 selectors 与 ResourceClaim 中 `exactly.selectors` 取 AND 关系，两者均满足才算匹配成功。
 
-| 维度 | Device Plugin | DRA |
-|------|--------------|-----|
-| 设备发现 | kubelet 调用 ListAndWatch | 驱动主动发布 ResourceSlice 到 API Server |
-| 资源申请方式 | `resources.limits` | `resources.claims` + ResourceClaim |
-| 设备筛选 | 只能按数量 | CEL 表达式按属性过滤 |
-| 共享设备 | 不支持 | 支持（ResourceClaim 可被多 Pod 共享） |
-| 调度器感知 | 节点可用数量 | 设备完整属性 |
-| K8s 版本 | Stable（很早） | 1.34 GA |
+### ResourceClaim
+
+ResourceClaim 是用户声明资源需求的对象，命名空间级资源，类似 PersistentVolumeClaim。`spec.devices.requests` 中每个 request 描述一项设备需求：
+
+- `name`：本 Pod 内的引用名，Pod 的 `resources.claims[].request` 与此对应。
+- `exactly.deviceClassName`：引用 DeviceClass，指定设备类型。
+- `exactly.count`：需要的设备数量，默认为 1。
+- `exactly.selectors`：在 DeviceClass 条件之上追加 CEL 筛选，例如进一步限定显存大小或 NUMA 域。
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: my-fake-device
+spec:
+  devices:
+    requests:
+      - name: my-request
+        exactly:
+          deviceClassName: fake-device
+          # 可选：追加 CEL 条件进一步筛选设备
+          # selectors:
+          #   - cel:
+          #       expression: device.capacity["fake.dra.example.com"].memory.compareTo(quantity("16Gi")) >= 0
+```
+
+调度器找到满足条件的设备后，将分配结果写入 `status.allocation`，ResourceClaim 进入 `allocated` 状态。Pod 绑定节点后变为 `allocated,reserved`，设备被独占。ResourceClaim 可以被多个 Pod 共享（`status.reservedFor` 列出所有持有者），也可以在 Pod 删除后重新分配给新 Pod。
+
+### ResourceClaimTemplate
+
+ResourceClaimTemplate 用于"每个 Pod 独享一个 ResourceClaim"的场景，适合不希望设备在多 Pod 间共享的情况。`spec.spec` 与 ResourceClaim 的 `spec` 字段完全一致；`spec.metadata` 中的 labels/annotations 会被复制到生成的 ResourceClaim 上。
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: my-fake-device-template
+  namespace: default
+spec:
+  metadata:
+    labels:
+      app: my-app
+  spec:
+    devices:
+      requests:
+        - name: my-request
+          exactly:
+            deviceClassName: fake-device
+```
+
+Pod 通过 `resourceClaimTemplateName`（而非 `resourceClaimName`）引用 Template：
+
+```yaml
+spec:
+  resourceClaims:
+    - name: my-device
+      resourceClaimTemplateName: my-fake-device-template
+  containers:
+    - name: consumer
+      resources:
+        claims:
+          - name: my-device
+            request: my-request
+```
+
+Pod 创建时 Kubernetes 自动生成一个独立的 ResourceClaim（名称格式为 `<pod-name>-<claim-name>-<suffix>`），Pod 删除时该 ResourceClaim 随之删除。与直接引用 ResourceClaim 的区别仅在于生命周期：前者与 Pod 同生共死，后者由用户手动管理，可在 Pod 删除后继续保留或被其他 Pod 复用。
 
 ## 整体架构
 
-DRA 的资源生命周期分两个阶段：调度阶段由调度器完成设备匹配，节点准备阶段由 kubelet 驱动实际的设备初始化：
+DRA 涉及五个角色：
+
+- **DRA 驱动**：以 DaemonSet 部署到每个节点，分为两个逻辑组件。**Controller** 负责向 API Server 发布本节点的 ResourceSlice；**kubelet Plugin** 通过 gRPC 接收 kubelet 的调用，执行设备的实际初始化和释放。两者通常运行在同一进程内。
+- **kube-apiserver**：存储 ResourceSlice、ResourceClaim、DeviceClass 等 DRA 对象，是各组件唯一的通信枢纽。
+- **kube-scheduler**：从 API Server 读取 ResourceSlice，对设备属性跑 CEL 表达式完成匹配，将分配结果写回 ResourceClaim 的 `status.allocation`，并为 Pod 绑定节点。整个过程纯粹在控制面完成，无需和节点通信。
+- **kubelet**：检测到 Pod 调度到本节点后，通过 DRA gRPC 接口依次调用驱动的 `NodePrepareResources`（设备初始化）和 `NodeUnprepareResources`（设备释放）。同时负责发现并注册 DRA 驱动（plugin manager 机制）。
+- **containerd**：从 kubelet 接收 CDI 设备 ID，读取 `/etc/cdi/` 下的描述文件，将设备注入容器（设置环境变量、挂载路径、设备节点等）。
+
+资源的完整生命周期跨越四个阶段：驱动启动、调度、节点准备、Pod 删除：
 
 ```plantuml
 @startuml
@@ -77,32 +166,43 @@ actor "用户" as user
 
 == 驱动启动 ==
 drv -> api : 创建 ResourceSlice（发布设备及属性）
-drv -> drv : 启动 dra.sock
-drv -> drv : 创建注册 socket
+drv -> k : 在 plugins_registry/ 创建注册 socket
 k -> drv : GetInfo()
 drv --> k : 类型=DRAPlugin，dra.sock 路径
-k -> drv : NotifyRegistrationStatus(ok)
+k -> drv : NotifyRegistrationStatus(registered=true)
 
 == 调度阶段 ==
-user -> api : 创建 ResourceClaim
-user -> api : 创建 Pod（引用 ResourceClaim）
+user -> api : 创建 DeviceClass + ResourceClaim
+user -> api : 创建 Pod（spec.resourceClaims 引用 ResourceClaim）
 sch -> api : 读取 ResourceSlice，CEL 匹配设备
-sch -> api : 写入 ResourceClaim.status.allocation
-sch -> api : 写入 Pod.spec.nodeName
+note right of sch : ResourceClaim 状态变为 allocated
+sch -> api : 写入 ResourceClaim.status.allocation（分配结果）
+sch -> api : 绑定 Pod 到节点（写入 spec.nodeName）
 
 == 节点准备阶段 ==
 k -> drv : NodePrepareResources(claims)
-drv -> drv : 初始化设备
+drv -> drv : 初始化设备（如创建软链接、分配显存分区等）
 drv --> k : CDI 设备 ID 列表
-k -> cri : 创建容器（携带 CDI ID）
-cri -> cri : 按 CDI 规范注入设备
+note right of k : ResourceClaim 状态变为 allocated,reserved
+k -> cri : RunPodSandbox / CreateContainer（携带 CDI ID）
+cri -> cri : 按 CDI 规范将设备注入容器
+
+== Pod 删除 ==
+user -> api : 删除 Pod
+k -> cri : StopContainer / RemovePodSandbox
+k -> drv : NodeUnprepareResources(claims)
+drv -> drv : 释放设备资源
+drv --> k : 成功（Claims map 中每个 claim 均有对应条目）
+k -> api : 清除 ResourceClaim.status.reservedFor
 @enduml
 ```
 
-两个阶段的关键点：
+四个阶段的关键点：
 
-- **调度阶段**：调度器直接读取 API Server 中的 ResourceSlice，对每个设备的 `attributes` 跑 CEL 表达式，找到满足条件的节点和设备后，将分配结果写入 ResourceClaim 的 `status.allocation`，整个过程在控制面完成，不需要和节点通信。
-- **节点准备阶段**：kubelet 发现 Pod 调度到本节点后，通过 DRA gRPC 接口调用驱动的 `NodePrepareResources`，驱动准备好设备并返回 CDI 设备 ID，kubelet 将这些 ID 传给 containerd。containerd 通过 CDI 规范读取 `/etc/cdi/` 下的描述文件，按其中定义的环境变量、挂载、设备节点完成设备注入。CDI 之于设备注入，类似 CNI 之于网络，是驱动与容器运行时之间的标准化协议。
+- **驱动启动**：Controller 先通过 API Server 发布 ResourceSlice，让调度器立即看到设备。Plugin 随后在 `plugins_registry/` 创建注册 socket，kubelet 的 plugin manager 检测到后主动调用 `GetInfo` 完成握手，握手成功后 kubelet 才会向该驱动发起 `NodePrepareResources`。
+- **调度阶段**：调度器在扩展点 `PreFilter`/`Filter`/`Reserve` 中处理 ResourceClaim。它遍历 ResourceSlice 中的每个设备，对 DeviceClass 的 selector 以及 ResourceClaim 中 `exactly.selectors` 的 CEL 表达式逐一求值，找到满足条件的节点和设备组合后，将分配结果写入 `status.allocation`，ResourceClaim 进入 `allocated` 状态。
+- **节点准备阶段**：kubelet 调用 `NodePrepareResources` 时传入已分配给该 Pod 的所有 ResourceClaim（含 namespace、name、uid），驱动执行设备初始化操作并返回 CDI 设备 ID。kubelet 将 CDI ID 传给 containerd，containerd 读取 `/etc/cdi/` 下对应的 JSON 描述文件，完成环境变量注入、设备节点挂载等操作。CDI 之于设备注入，类似 CNI 之于网络，是驱动与容器运行时之间的标准化协议。
+- **Pod 删除**：kubelet 停止容器后调用 `NodeUnprepareResources` 释放设备。驱动必须在响应的 `Claims` map 中为每个传入的 claim 写入对应条目，否则 kubelet 认为释放未成功并持续重试。设备释放后，调度器清除 ResourceClaim 的 `status.reservedFor`，该 claim 可以被重新调度分配。
 
 ## 实现 DRA 驱动
 
@@ -345,11 +445,11 @@ DaemonSet 启动后，每个节点上的驱动实例各自发布本节点的 Res
 
 ```bash
 $ kubectl -n dra-system logs simple-dra-driver-x7bxr
-I0418 14:02:11.123456  1 main.go:18] Starting simple DRA driver
-I0418 14:02:11.234567  1 controller.go:65] Created ResourceSlice fake.dra.example.com-node01 with 5 devices
-I0418 14:02:11.345678  1 plugin.go:94] DRA plugin gRPC server started at /var/lib/kubelet/plugins/fake.dra.example.com/dra.sock
-I0418 14:02:11.456789  1 plugin.go:120] Registration server started at /var/lib/kubelet/plugins_registry/fake.dra.example.com.sock
-I0418 14:02:11.567890  1 plugin.go:154] Plugin successfully registered with kubelet
+I0420 13:55:52.218622       1 main.go:18] Starting simple DRA driver
+I0420 13:55:52.277375       1 controller.go:102] Updated ResourceSlice fake.dra.example.com-node01
+I0420 13:55:52.277867       1 plugin.go:94] DRA plugin gRPC server started at /var/lib/kubelet/plugins/fake.dra.example.com/dra.sock
+I0420 13:55:52.278284       1 plugin.go:120] Registration server started at /var/lib/kubelet/plugins_registry/fake.dra.example.com.sock
+I0420 13:55:53.149397       1 plugin.go:153] Plugin successfully registered with kubelet
 ```
 
 ### 创建 DeviceClass 和 ResourceClaim
@@ -379,7 +479,6 @@ spec:
   devices:
     requests:
       - name: my-request
-        # resource/v1 中 deviceClassName 移到了 exactly 子对象内
         exactly:
           deviceClassName: fake-device
 ```
@@ -411,6 +510,25 @@ spec:
 ```
 
 Pod 创建后，调度器读取 ResourceSlice，找到满足 DeviceClass CEL 条件的设备，将分配结果写入 ResourceClaim 的 `status.allocation`，随后选定节点。kubelet 检测到 Pod 调度到本节点，调用驱动的 `NodePrepareResources`，驱动返回 CDI 设备 ID，containerd 完成设备注入，容器启动。
+
+ResourceClaim 被分配并绑定到 Pod 后，状态变为 `allocated,reserved`：
+
+```bash
+$ kubectl get resourceclaim my-fake-device
+NAME             ALLOCATION-MODE   STATE                AGE
+my-fake-device                     allocated,reserved   16s
+```
+
+驱动日志同步记录了 NodePrepareResources 和 NodeUnprepareResources 的调用（Pod 删除时触发释放）：
+
+```bash
+# Pod 调度到节点后，kubelet 调用 NodePrepareResources
+I0420 13:56:32.563769       1 plugin.go:174] NodePrepareResources: claim=default/my-fake-device uid=a52cda2c-26a3-497c-9db5-779f48593f2c
+I0420 13:56:32.563840       1 plugin.go:181]   prepared device: cdi=fake.dra.example.com/device=fake-0
+
+# Pod 删除后，kubelet 调用 NodeUnprepareResources 释放设备
+I0420 13:57:27.932697       1 plugin.go:208] NodeUnprepareResources: claim=default/my-fake-device uid=a52cda2c-26a3-497c-9db5-779f48593f2c
+```
 
 ## 总结
 
