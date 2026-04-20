@@ -149,6 +149,8 @@ DRA 涉及五个角色：
 
 资源的完整生命周期跨越四个阶段：驱动启动、调度、节点准备、Pod 删除：
 
+**驱动启动 + 调度**
+
 ```plantuml
 @startuml
 !theme plain
@@ -161,7 +163,6 @@ participant "DRA 驱动" as drv #FFE0B2
 participant "kube-apiserver" as api #E3F2FD
 participant "kube-scheduler" as sch #E8F5E9
 participant "kubelet" as k #BBDEFB
-participant "containerd" as cri #F3E5F5
 actor "用户" as user
 
 == 驱动启动 ==
@@ -178,10 +179,30 @@ sch -> api : 读取 ResourceSlice，CEL 匹配设备（PreFilter/Filter）
 sch -> api : 写入 status.allocation + reservedFor（PreBind）
 note right of sch : ResourceClaim 状态变为 allocated,reserved
 sch -> api : 绑定 Pod 到节点（写入 spec.nodeName）
+@enduml
+```
+
+- **驱动启动**：Controller 先通过 API Server 发布 ResourceSlice，让调度器立即看到设备。Plugin 随后在 `plugins_registry/` 创建注册 socket，kubelet 的 plugin manager 检测到后主动调用 `GetInfo` 完成握手，握手成功后 kubelet 才会向该驱动发起 `NodePrepareResources`。
+- **调度阶段**：调度器在 `PreFilter`/`Filter` 阶段筛选可行节点，`Reserve` 阶段确定设备分配方案，**`PreBind`** 阶段将 `status.allocation` 和 `status.reservedFor` 一次性写入 API Server，ResourceClaim 进入 `allocated,reserved` 状态，随后 `Bind` 阶段写入 `pod.spec.nodeName`。
+
+**节点准备 + Pod 删除**
+
+```plantuml
+@startuml
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam defaultTextAlignment center
+skinparam ParticipantPadding 20
+
+participant "DRA 驱动" as drv #FFE0B2
+participant "kube-apiserver" as api #E3F2FD
+participant "kubelet" as k #BBDEFB
+participant "containerd" as cri #F3E5F5
+actor "用户" as user
 
 == 节点准备阶段 ==
 k -> drv : NodePrepareResources(claims)
-drv -> drv : 初始化设备（如创建软链接、分配显存分区等）
 drv --> k : CDI 设备 ID 列表
 k -> cri : RunPodSandbox / CreateContainer（携带 CDI ID）
 cri -> cri : 按 CDI 规范将设备注入容器
@@ -190,16 +211,11 @@ cri -> cri : 按 CDI 规范将设备注入容器
 user -> api : 删除 Pod
 k -> cri : StopContainer / RemovePodSandbox
 k -> drv : NodeUnprepareResources(claims)
-drv -> drv : 释放设备资源
 drv --> k : 成功（Claims map 中每个 claim 均有对应条目）
 note right of k : resource claim controller 检测到 Pod 已删除\n清除 reservedFor 和 allocation，claim 回到未分配状态
 @enduml
 ```
 
-四个阶段的关键点：
-
-- **驱动启动**：Controller 先通过 API Server 发布 ResourceSlice，让调度器立即看到设备。Plugin 随后在 `plugins_registry/` 创建注册 socket，kubelet 的 plugin manager 检测到后主动调用 `GetInfo` 完成握手，握手成功后 kubelet 才会向该驱动发起 `NodePrepareResources`。
-- **调度阶段**：调度器在 `PreFilter`/`Filter` 阶段筛选可行节点，`Reserve` 阶段确定设备分配方案，**`PreBind`** 阶段将 `status.allocation` 和 `status.reservedFor` 一次性写入 API Server，ResourceClaim 进入 `allocated,reserved` 状态，随后 `Bind` 阶段写入 `pod.spec.nodeName`。
 - **节点准备阶段**：kubelet 调用 `NodePrepareResources` 时传入已分配给该 Pod 的所有 ResourceClaim（含 namespace、name、uid），驱动执行设备初始化操作并返回 CDI 设备 ID。kubelet 将 CDI ID 传给 containerd，containerd 读取 `/etc/cdi/` 下对应的 JSON 描述文件，完成环境变量注入、设备节点挂载等操作。CDI 之于设备注入，类似 CNI 之于网络，是驱动与容器运行时之间的标准化协议。
 - **Pod 删除**：kubelet 停止容器后调用 `NodeUnprepareResources` 释放设备。驱动必须在响应的 `Claims` map 中为每个传入的 claim 写入对应条目，否则 kubelet 认为释放未成功并持续重试。设备释放后，kube-controller-manager 的 resource claim controller 检测到 Pod 已删除，**一次性清除 `status.reservedFor` 和 `status.allocation`**，claim 回到完全未分配状态。这是 DRA 的"用时分配、用完即释放"设计：立即释放底层资源，避免下一个 Pod 被迫调度到同一节点。
 
