@@ -140,7 +140,7 @@ func (p *DRAPlugin) GetInfo(_ context.Context, _ *registerapi.InfoRequest) (*reg
 		Type:              registerapi.DRAPlugin,
 		Name:              DriverName,
 		Endpoint:          p.draSocketPath,
-		SupportedVersions: []string{"v1"},
+		SupportedVersions: []string{"v1.DRAPlugin"},
 	}, nil
 }
 
